@@ -3,7 +3,7 @@
   "short_name": "KenLab",
   "start_url": ".",
   "display": "standalone",
-  "background_color": "#FFFFFF",
-  "theme_color": "#2196F3",
-  "description": "KenLab Telecom Tools"
+  "background_color": "#C62828",
+  "theme_color": "#C62828",
+  "description": "Herramientas colaborativas de campo para telecomunicaciones"
 }

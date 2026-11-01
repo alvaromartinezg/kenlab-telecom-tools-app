@@ -2,23 +2,21 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kenlab_telecom_tools/app/app.dart';
 
 void main() {
-  testWidgets('shows KenLab home and opens the microwave module',
+  testWidgets('shows the red KenLab splash before the tools menu',
       (tester) async {
     await tester.pumpWidget(const KenLabApp());
 
     expect(find.text('KenLab'), findsOneWidget);
-    expect(find.text('Bienvenido a KenLab'), findsOneWidget);
+    expect(find.text('HERRAMIENTAS DE CAMPO'), findsOneWidget);
+    expect(find.text('Herramientas de campo'), findsNothing);
+
+    await tester.pump(const Duration(milliseconds: 1300));
+    await tester.pump(const Duration(milliseconds: 400));
+
     expect(find.text('Herramientas de campo'), findsOneWidget);
     expect(find.text('Alineación microondas'), findsOneWidget);
+    expect(find.text('Cámara de campo'), findsOneWidget);
     expect(find.text('Fibra óptica'), findsOneWidget);
     expect(find.text('Mantenimiento'), findsOneWidget);
-
-    await tester.tap(find.text('Empezar'));
-    await tester.pumpAndSettle();
-
-    expect(
-        find.text(
-            'La pantalla inicial está lista. El flujo de alineación se añadirá en la siguiente etapa.'),
-        findsOneWidget);
   });
 }
