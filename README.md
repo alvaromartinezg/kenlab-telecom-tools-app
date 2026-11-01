@@ -38,6 +38,20 @@ No se migrará Python a Go salvo que mediciones de rendimiento demuestren una ne
 
 ## Módulo inicial: MW LinkAlign
 
+### Beta funcional en curso
+
+La siguiente beta incorpora una pantalla de arranque roja con el monograma K/A de KenLab y luego abre el menú de herramientas. La primera cámara y pantalla de alineación son flujos locales de prueba:
+
+- **Cámara de campo:** vista en vivo de la cámara trasera, lectura de GPS, altitud y precisión, fecha/hora y descripción opcional. Al capturar, incrusta esos datos en la parte inferior de la imagen y permite descargarla como JPG. Si el GPS no está permitido, la foto puede capturarse, pero se identifica que no tiene ubicación.
+- **Alineación beta:** abre la cámara y consulta la ubicación de Site A. El técnico introduce latitud/longitud de Site B; la app calcula azimut y distancia, dibuja una guía direccional con el rumbo magnético del teléfono cuando está disponible, e incluye inclinómetro del dispositivo y tilt geométrico.
+- Para calcular el tilt de enlace se usa la altitud capturada para A y se permite introducir la elevación del terreno y la altura de antena en ambos extremos. Esos datos del teléfono son aproximados y deben confirmarse.
+- El control **Conectar técnico** muestra el punto de entrada al flujo colaborativo, pero no conecta todavía dos dispositivos: requiere implementar y desplegar la API de sesiones y WebSockets descrita en la arquitectura.
+- Esta beta no sincroniza ni conserva una biblioteca de fotos dentro de la app. Los JPG se descargan al dispositivo. El mapa, KMZ, perfil topográfico y el tablero de mantenimiento siguen pendientes.
+
+En PWA, cámara, geolocalización y sensores dependen del navegador, hardware y permisos. El sitio debe abrirse con HTTPS; el magnetómetro no está disponible o calibrado en todos los teléfonos. Cerca de torres y estructuras metálicas puede marcar rumbos incorrectos. La guía del teléfono nunca sustituye la medición final del radio.
+
+### Flujo de MW Alignment planeado
+
 ### Sesión y colaboración Site A / Site B
 
 1. El técnico A abre la aplicación y crea una sesión de alineación.
