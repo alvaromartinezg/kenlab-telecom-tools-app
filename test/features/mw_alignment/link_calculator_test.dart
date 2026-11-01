@@ -25,4 +25,18 @@ void main() {
 
     expect(tilt, closeTo(1.145, 0.01));
   });
+
+  test('parses signed coordinates copied from a Google Maps URL', () {
+    final coordinate = LinkGeometry.parseCoordinatePair(
+      'https://maps.google.com/?q=-34.603722, -58.381592',
+    );
+
+    expect(coordinate?.latitude, -34.603722);
+    expect(coordinate?.longitude, -58.381592);
+  });
+
+  test('parses Unicode minus and rejects out-of-range coordinates', () {
+    expect(LinkGeometry.parseCoordinatePair('−34.6, −58.3')?.latitude, -34.6);
+    expect(LinkGeometry.parseCoordinatePair('91, 0'), isNull);
+  });
 }

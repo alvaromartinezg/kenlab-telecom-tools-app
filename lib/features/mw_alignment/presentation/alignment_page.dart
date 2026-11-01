@@ -3,9 +3,11 @@ import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
+import '../../../core/location/elevation_service.dart';
 import '../domain/link_calculator.dart';
 
 class AlignmentPage extends StatefulWidget {
@@ -25,12 +27,15 @@ class _AlignmentPageState extends State<AlignmentPage> {
   bool _useInclinometer = true;
   bool _connectionMode = false;
   String? _error;
+  double? _siteBGroundAltitude;
+  bool _loadingElevation = false;
+  String? _elevationError;
+  Timer? _elevationDebounce;
   StreamSubscription<AccelerometerEvent>? _accSubscription;
   StreamSubscription<MagnetometerEvent>? _magSubscription;
 
   final _siteBLat = TextEditingController();
   final _siteBLon = TextEditingController();
-  final _siteBAlt = TextEditingController();
   final _siteAAntennaHeight = TextEditingController(text: '0');
   final _siteBAntennaHeight = TextEditingController(text: '0');
   final _connectionCode = TextEditingController();
@@ -50,7 +55,7 @@ class _AlignmentPageState extends State<AlignmentPage> {
     _magSubscription?.cancel();
     _siteBLat.dispose();
     _siteBLon.dispose();
-    _siteBAlt.dispose();
+    _elevationDebounce?.cancel();
     _siteAAntennaHeight.dispose();
     _siteBAntennaHeight.dispose();
     _connectionCode.dispose();
@@ -150,8 +155,8 @@ class _AlignmentPageState extends State<AlignmentPage> {
 
   LinkGeometry? get _geometry {
     final start = _siteA;
-    final lat = double.tryParse(_siteBLat.text.trim());
-    final lon = double.tryParse(_siteBLon.text.trim());
+    final lat = double.tryParse(_siteBLat.text.trim().replaceAll('−', '-'));
+    final lon = double.tryParse(_siteBLon.text.trim().replaceAll('−', '-'));
     if (start == null ||
         lat == null ||
         lon == null ||
@@ -167,7 +172,7 @@ class _AlignmentPageState extends State<AlignmentPage> {
 
   double? get _tilt {
     final start = _siteA;
-    final endAltitude = double.tryParse(_siteBAlt.text.trim());
+    final endAltitude = _siteBGroundAltitude;
     final startHeight = double.tryParse(_siteAAntennaHeight.text.trim());
     final endHeight = double.tryParse(_siteBAntennaHeight.text.trim());
     final geometry = _geometry;
@@ -185,6 +190,63 @@ class _AlignmentPageState extends State<AlignmentPage> {
       toGroundMeters: endAltitude,
       toAntennaHeightMeters: endHeight,
     );
+  }
+
+  void _siteBCoordinatesChanged() {
+    setState(() {
+      _siteBGroundAltitude = null;
+      _elevationError = null;
+    });
+    _elevationDebounce?.cancel();
+    final lat = double.tryParse(_siteBLat.text.trim().replaceAll('−', '-'));
+    final lon = double.tryParse(_siteBLon.text.trim().replaceAll('−', '-'));
+    if (lat == null || lon == null || lat.abs() > 90 || lon.abs() > 180) return;
+    _elevationDebounce = Timer(const Duration(milliseconds: 500), () {
+      _fetchSiteBElevation(lat, lon);
+    });
+  }
+
+  Future<void> _fetchSiteBElevation(double latitude, double longitude) async {
+    setState(() => _loadingElevation = true);
+    try {
+      final elevation = await const ElevationService().forCoordinate(
+        latitude: latitude,
+        longitude: longitude,
+      );
+      if (!mounted ||
+          double.tryParse(_siteBLat.text.trim().replaceAll('−', '-')) !=
+              latitude ||
+          double.tryParse(_siteBLon.text.trim().replaceAll('−', '-')) !=
+              longitude) return;
+      setState(() {
+        _siteBGroundAltitude = elevation;
+        _loadingElevation = false;
+        _elevationError = null;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loadingElevation = false;
+        _elevationError = error.toString().replaceFirst('Exception: ', '');
+      });
+    }
+  }
+
+  Future<void> _pasteSiteBCoordinates() async {
+    final clipboard = await Clipboard.getData(Clipboard.kTextPlain);
+    final pair = LinkGeometry.parseCoordinatePair(clipboard?.text ?? '');
+    if (pair == null) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text(
+                  'Copia en Google Maps las coordenadas en formato latitud, longitud.')),
+        );
+      return;
+    }
+    _siteBLat.text = pair.latitude.toString();
+    _siteBLon.text = pair.longitude.toString();
+    _siteBCoordinatesChanged();
   }
 
   double? get _pitch {
@@ -338,18 +400,42 @@ class _AlignmentPageState extends State<AlignmentPage> {
                   Row(children: [
                     Expanded(
                         child: _numberField(
-                            _siteBLat, 'Latitud Site B', 'Ej. 19.432608')),
+                            _siteBLat, 'Latitud Site B', 'Ej. -34.603722',
+                            onChanged: _siteBCoordinatesChanged)),
                     const SizedBox(width: 10),
                     Expanded(
                         child: _numberField(
-                            _siteBLon, 'Longitud Site B', 'Ej. -99.133209')),
+                            _siteBLon, 'Longitud Site B', 'Ej. -58.381592',
+                            onChanged: _siteBCoordinatesChanged)),
+                    IconButton(
+                      tooltip: 'Pegar coordenadas de Google Maps',
+                      onPressed: _pasteSiteBCoordinates,
+                      icon: const Icon(Icons.content_paste_go),
+                    ),
                   ]),
                   const SizedBox(height: 10),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Row(children: [
+                      const Icon(Icons.terrain,
+                          size: 18, color: Color(0xFF66736B)),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          _loadingElevation
+                              ? 'Consultando elevación del terreno de Site B…'
+                              : _siteBGroundAltitude != null
+                                  ? 'Elevación Site B: ${_siteBGroundAltitude!.toStringAsFixed(1)} m (estimada automáticamente)'
+                                  : _elevationError ??
+                                      'La elevación se consulta al ingresar coordenadas.',
+                          style: const TextStyle(
+                              fontSize: 12, color: Color(0xFF66736B)),
+                        ),
+                      ),
+                    ]),
+                  ),
+                  const SizedBox(height: 10),
                   Row(children: [
-                    Expanded(
-                        child: _numberField(_siteBAlt, 'Altitud terreno B (m)',
-                            'Altitud GPS/mapa')),
-                    const SizedBox(width: 10),
                     Expanded(
                         child: _numberField(
                             _siteAAntennaHeight, 'Altura antena A (m)', '0')),
@@ -425,12 +511,15 @@ class _AlignmentPageState extends State<AlignmentPage> {
   }
 
   Widget _numberField(
-          TextEditingController controller, String label, String hint) =>
+          TextEditingController controller, String label, String hint,
+          {VoidCallback? onChanged}) =>
       TextField(
         controller: controller,
-        keyboardType:
-            const TextInputType.numberWithOptions(signed: true, decimal: true),
-        onChanged: (_) => setState(() {}),
+        keyboardType: TextInputType.text,
+        onChanged: (_) {
+          setState(() {});
+          onChanged?.call();
+        },
         decoration: InputDecoration(
           labelText: label,
           hintText: hint,

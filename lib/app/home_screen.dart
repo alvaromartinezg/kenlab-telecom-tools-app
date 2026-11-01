@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../features/geo_camera/presentation/field_camera_page.dart';
+import '../features/field_map/presentation/field_map_page.dart';
 import '../features/mw_alignment/presentation/alignment_page.dart';
 import '../shared/widgets/kenlab_mark.dart';
 
@@ -136,6 +137,7 @@ class HomeScreen extends StatelessWidget {
     final page = switch (index) {
       0 => const AlignmentPage(),
       1 => const FieldCameraPage(),
+      2 => const FieldMapPage(),
       _ => ToolPlaceholderPage(item: tools[index]),
     };
     Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => page));

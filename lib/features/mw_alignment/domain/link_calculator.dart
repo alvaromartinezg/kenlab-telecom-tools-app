@@ -7,6 +7,25 @@ class LinkGeometry {
   final double distanceMeters;
   final double bearingDegrees;
 
+  static ({double latitude, double longitude})? parseCoordinatePair(
+    String input,
+  ) {
+    final normalized = input.replaceAll(RegExp('[−–—]'), '-');
+    final match = RegExp(
+      r'([-+]?\d{1,2}(?:\.\d+)?)\s*[,;]\s*([-+]?\d{1,3}(?:\.\d+)?)',
+    ).firstMatch(normalized);
+    if (match == null) return null;
+    final latitude = double.tryParse(match.group(1)!);
+    final longitude = double.tryParse(match.group(2)!);
+    if (latitude == null ||
+        longitude == null ||
+        latitude.abs() > 90 ||
+        longitude.abs() > 180) {
+      return null;
+    }
+    return (latitude: latitude, longitude: longitude);
+  }
+
   static LinkGeometry between({
     required double fromLatitude,
     required double fromLongitude,
