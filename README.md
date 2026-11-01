@@ -44,9 +44,13 @@ La siguiente beta incorpora una pantalla de arranque roja con el monograma K/A d
 
 - **Cámara de campo:** vista en vivo de la cámara trasera, lectura de GPS, altitud y precisión, fecha/hora y descripción opcional. Al capturar, incrusta esos datos en la parte inferior de la imagen y permite descargarla como JPG. Si el GPS no está permitido, la foto puede capturarse, pero se identifica que no tiene ubicación.
 - **Alineación beta:** abre la cámara y consulta la ubicación de Site A. El técnico introduce latitud/longitud de Site B; la app calcula azimut y distancia, dibuja una guía direccional con el rumbo magnético del teléfono cuando está disponible, e incluye inclinómetro del dispositivo y tilt geométrico.
-- Para calcular el tilt de enlace se usa la altitud capturada para A y se permite introducir la elevación del terreno y la altura de antena en ambos extremos. Esos datos del teléfono son aproximados y deben confirmarse.
+- Para calcular el tilt de enlace se usa la altitud capturada para A, la elevación de terreno de B consultada por sus coordenadas y la altura de antena de ambos extremos. La altitud GPS y la elevación de terreno son aproximadas y deben confirmarse.
 - El control **Conectar técnico** muestra el punto de entrada al flujo colaborativo, pero no conecta todavía dos dispositivos: requiere implementar y desplegar la API de sesiones y WebSockets descrita en la arquitectura.
-- Esta beta no sincroniza ni conserva una biblioteca de fotos dentro de la app. Los JPG se descargan al dispositivo. El mapa, KMZ, perfil topográfico y el tablero de mantenimiento siguen pendientes.
+- Esta beta aún no sincroniza datos entre técnicos ni conserva una biblioteca interna de fotos. La cámara de campo descarga sus JPG; las fotos de una ruta se empaquetan en el KMZ.
+
+La pantalla actualizada de **Mapa de trabajo** usa MapLibre con vista inclinada 3D por defecto. Permite grabar una caminata con GPS, asociar fotos a coordenadas durante la grabación, exportar el trazo y las fotos incrustadas a KMZ, e importar un KMZ para mostrar su línea y referencias fotográficas. El soporte de paquetes de teselas offline de MapLibre funciona en las versiones nativas Android/iOS; MapLibre Web no implementa descargas de regiones, por lo que el botón de PWA informa esa limitación. El trazo y sus fotos se conservan en memoria hasta exportarlos; no hay biblioteca persistente ni sincronización multiusuario todavía.
+
+Al ingresar o pegar las coordenadas de Site B, la elevación del terreno se consulta automáticamente a Open-Meteo. Se necesita conexión para esa consulta y se envían las coordenadas a ese servicio. Si no hay red, los cálculos de azimut/distancia continúan, pero el tilt espera la elevación.
 
 En PWA, cámara, geolocalización y sensores dependen del navegador, hardware y permisos. El sitio debe abrirse con HTTPS; el magnetómetro no está disponible o calibrado en todos los teléfonos. Cerca de torres y estructuras metálicas puede marcar rumbos incorrectos. La guía del teléfono nunca sustituye la medición final del radio.
 
