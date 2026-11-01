@@ -5,7 +5,7 @@ class KenLabApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const brandGreen = Color(0xFF176B4D);
+    const brandRed = Color(0xFFC62828);
 
     return MaterialApp(
       title: 'KenLab',
@@ -13,7 +13,7 @@ class KenLabApp extends StatelessWidget {
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(
-          seedColor: brandGreen,
+          seedColor: brandRed,
           brightness: Brightness.light,
         ),
         scaffoldBackgroundColor: const Color(0xFFF5F7F5),
@@ -36,7 +36,7 @@ class HomeScreen extends StatelessWidget {
       title: 'Alineación microondas',
       subtitle: 'Coordina Site A y Site B',
       icon: Icons.settings_input_antenna,
-      color: Color(0xFF176B4D),
+      color: Color(0xFFC62828),
       available: true,
     ),
     _ToolItem(
@@ -181,7 +181,7 @@ class _WelcomeCard extends StatelessWidget {
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(24),
         gradient: const LinearGradient(
-          colors: [Color(0xFF176B4D), Color(0xFF104A39)],
+          colors: [Color(0xFFC62828), Color(0xFF263746)],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
@@ -208,7 +208,7 @@ class _WelcomeCard extends StatelessWidget {
             onPressed: onStart,
             style: FilledButton.styleFrom(
               backgroundColor: Colors.white,
-              foregroundColor: const Color(0xFF145A42),
+              foregroundColor: const Color(0xFF263746),
             ),
             icon: const Icon(Icons.arrow_forward),
             label: const Text('Empezar'),
