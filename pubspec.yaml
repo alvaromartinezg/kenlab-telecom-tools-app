@@ -13,6 +13,8 @@ dependencies:
   file_saver: ^0.7.0
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
   geolocator: ^14.1.2
   http: ^1.6.0
   image: ^4.12.0

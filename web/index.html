@@ -17,37 +17,64 @@
     window.kenlabCompass = {
       requestPermission: async function () {
         const Orientation = window.DeviceOrientationEvent;
-        if (!Orientation) return 'unsupported';
+        const Motion = window.DeviceMotionEvent;
+        if (!Orientation && !Motion) return 'unsupported';
         try {
-          const orientationPermission = typeof Orientation.requestPermission === 'function'
+          const orientationPermission = Orientation && typeof Orientation.requestPermission === 'function'
             ? Orientation.requestPermission()
             : Promise.resolve('granted');
-          const Motion = window.DeviceMotionEvent;
           const motionPermission = Motion && typeof Motion.requestPermission === 'function'
             ? Motion.requestPermission()
             : Promise.resolve('granted');
           const results = await Promise.all([orientationPermission, motionPermission]);
-          return results.every(result => result === 'granted') ? 'granted' : 'denied';
+          if (results.some(result => result === 'denied')) return 'denied';
+          return 'granted';
         } catch (_) {
           return 'denied';
         }
       },
       start: function (callback) {
-        const emit = function (event) {
+        let orientation = null;
+        let gravity = null;
+        const publish = function () {
+          const event = orientation;
+          if (!event) {
+            callback(null, null, null, false,
+              gravity ? gravity.x : null,
+              gravity ? gravity.y : null,
+              gravity ? gravity.z : null);
+            return;
+          }
           const nativeHeading = Number.isFinite(event.webkitCompassHeading)
             ? event.webkitCompassHeading
             : null;
           const absoluteHeading = event.absolute && Number.isFinite(event.alpha)
-            ? ((360 - event.alpha) % 360 + 360) % 360
+            ? ((360 - event.alpha - (screen.orientation ? screen.orientation.angle : 0)) % 360 + 360) % 360
             : null;
           const heading = nativeHeading === null ? absoluteHeading : nativeHeading;
-          callback(heading, event.beta, event.gamma, event.absolute === true);
+          callback(heading, event.beta, event.gamma, event.absolute === true,
+            gravity ? gravity.x : null,
+            gravity ? gravity.y : null,
+            gravity ? gravity.z : null);
         };
-        window.addEventListener('deviceorientation', emit, true);
-        window.addEventListener('deviceorientationabsolute', emit, true);
+        const onOrientation = function (event) {
+          orientation = event;
+          publish();
+        };
+        const onMotion = function (event) {
+          const sample = event.accelerationIncludingGravity;
+          if (sample && Number.isFinite(sample.x) && Number.isFinite(sample.y) && Number.isFinite(sample.z)) {
+            gravity = { x: sample.x, y: sample.y, z: sample.z };
+          }
+          publish();
+        };
+        window.addEventListener('deviceorientation', onOrientation, true);
+        window.addEventListener('deviceorientationabsolute', onOrientation, true);
+        window.addEventListener('devicemotion', onMotion, true);
         window.__kenlabCompassStop = function () {
-          window.removeEventListener('deviceorientation', emit, true);
-          window.removeEventListener('deviceorientationabsolute', emit, true);
+          window.removeEventListener('deviceorientation', onOrientation, true);
+          window.removeEventListener('deviceorientationabsolute', onOrientation, true);
+          window.removeEventListener('devicemotion', onMotion, true);
           window.__kenlabCompassStop = null;
         };
       },

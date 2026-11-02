@@ -12,6 +12,8 @@ import 'package:image/image.dart' as img;
 import 'package:maplibre_gl/maplibre_gl.dart' as ml;
 import 'package:share_plus/share_plus.dart';
 
+import '../../../core/settings/app_settings.dart';
+import '../../../core/settings/app_text.dart';
 import '../domain/kmz_route_codec.dart';
 
 class FieldMapPage extends StatefulWidget {
@@ -304,8 +306,10 @@ class _FieldMapPageState extends State<FieldMapPage> {
 
   Future<void> _downloadOfflineArea() async {
     if (kIsWeb) {
-      _message(
-          'La descarga de zonas offline está disponible en las versiones Android/iOS instalables; MapLibre Web no ofrece paquetes offline. La ruta y sus fotos sí pueden guardarse como KMZ.');
+      _message(appText(
+          context,
+          'La descarga de zonas offline está disponible en las versiones Android/iOS instalables; MapLibre Web no ofrece paquetes offline. La ruta y sus fotos sí pueden guardarse como KMZ.',
+          'Offline map downloads are available in the installable Android/iOS versions; MapLibre Web does not support offline packages. Routes and photos can still be saved as KMZ.'));
       return;
     }
     if (_mapCenter.latitude == 0 && _mapCenter.longitude == 0) {
@@ -320,11 +324,15 @@ class _FieldMapPageState extends State<FieldMapPage> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Descargar mapa sin conexión',
+                Text(
+                    appText(context, 'Descargar mapa sin conexión',
+                        'Download offline map'),
                     style: Theme.of(context).textTheme.titleLarge),
                 const SizedBox(height: 8),
-                const Text(
-                    'Descarga el área alrededor del centro del mapa. Selecciona el tamaño para controlar el almacenamiento.'),
+                Text(appText(
+                    context,
+                    'Descarga el área alrededor del centro del mapa. Selecciona el tamaño para controlar el almacenamiento.',
+                    'Download the area around the map center. Choose its size to manage storage.')),
                 const SizedBox(height: 12),
                 for (final option in const [
                   (0.5, '500 m alrededor'),
@@ -333,7 +341,8 @@ class _FieldMapPageState extends State<FieldMapPage> {
                 ])
                   ListTile(
                     leading: const Icon(Icons.download_for_offline_outlined),
-                    title: Text(option.$2),
+                    title: Text(appText(context, option.$2,
+                        option.$2.replaceAll('alrededor', 'around'))),
                     onTap: () => Navigator.pop(context, option.$1),
                   ),
               ]),
@@ -523,8 +532,9 @@ class _FieldMapPageState extends State<FieldMapPage> {
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 14, 12, 8),
               child: Row(children: [
-                const Expanded(
-                  child: Text('Fotos de la ruta',
+                Expanded(
+                  child: Text(
+                      appText(context, 'Fotos de la ruta', 'Route photos'),
                       style:
                           TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
                 ),
@@ -546,7 +556,7 @@ class _FieldMapPageState extends State<FieldMapPage> {
                           width: 58, height: 58, fit: BoxFit.cover),
                     ),
                     title: Text(
-                        'Foto ${index + 1} · ${photo.capturedAt.toLocal()}'),
+                        '${appText(context, 'Foto', 'Photo')} ${index + 1} · ${photo.capturedAt.toLocal()}'),
                     subtitle: Text(
                       photo.comment.isEmpty
                           ? '${photo.latitude.toStringAsFixed(6)}, ${photo.longitude.toStringAsFixed(6)}'
@@ -571,7 +581,7 @@ class _FieldMapPageState extends State<FieldMapPage> {
   Future<void> _showPhoto(_RoutePhoto photo, int index) => showDialog<void>(
         context: context,
         builder: (dialogContext) => AlertDialog(
-          title: Text('Foto ${index + 1}'),
+          title: Text('${appText(context, 'Foto', 'Photo')} ${index + 1}'),
           content: SingleChildScrollView(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               InteractiveViewer(child: Image.memory(photo.bytes)),
@@ -589,7 +599,7 @@ class _FieldMapPageState extends State<FieldMapPage> {
           actions: [
             TextButton(
                 onPressed: () => Navigator.pop(dialogContext),
-                child: const Text('Cerrar')),
+                child: Text(appText(context, 'Cerrar', 'Close'))),
           ],
         ),
       );
@@ -638,19 +648,22 @@ class _FieldMapPageState extends State<FieldMapPage> {
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(
-          title: const Text('Mapa de trabajo'),
+          title: Text(appText(context, 'Mapa de trabajo', 'Work map')),
           actions: [
             IconButton(
-                tooltip: 'Descargar zona offline',
+                tooltip: appText(
+                    context, 'Descargar zona offline', 'Download offline area'),
                 onPressed: _downloadingOffline ? null : _downloadOfflineArea,
                 icon: const Icon(Icons.download_for_offline_outlined)),
             IconButton(
-                tooltip: 'Importar KMZ de otro técnico',
+                tooltip: appText(context, 'Importar KMZ de otro técnico',
+                    'Import another technician’s KMZ'),
                 onPressed: _recording || _navigatingRoute ? null : _importKmz,
                 icon: const Icon(Icons.upload_file_outlined)),
             if (_photos.isNotEmpty)
               IconButton(
-                  tooltip: 'Ver fotos de la ruta',
+                  tooltip: appText(
+                      context, 'Ver fotos de la ruta', 'View route photos'),
                   onPressed: _showPhotoGallery,
                   icon: const Icon(Icons.photo_library_outlined)),
             const SizedBox(width: 4),
@@ -684,9 +697,12 @@ class _FieldMapPageState extends State<FieldMapPage> {
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   child: Row(mainAxisSize: MainAxisSize.min, children: [
                     Icon(_is3d ? Icons.view_in_ar : Icons.map_outlined,
-                        color: const Color(0xFFC62828), size: 18),
+                        color: AppSettings.instance.primaryColor, size: 18),
                     const SizedBox(width: 6),
-                    Text(_is3d ? 'Vista 3D' : 'Vista 2D',
+                    Text(
+                        _is3d
+                            ? appText(context, 'Vista 3D', '3D view')
+                            : appText(context, 'Vista 2D', '2D view'),
                         style: const TextStyle(fontWeight: FontWeight.w700)),
                     const SizedBox(width: 5),
                     const Icon(Icons.swap_horiz, size: 16),
@@ -715,7 +731,8 @@ class _FieldMapPageState extends State<FieldMapPage> {
                   child: Padding(
                       padding: const EdgeInsets.all(12),
                       child: Column(children: [
-                        const Text('Descargando teselas del mapa…'),
+                        Text(appText(context, 'Descargando teselas del mapa…',
+                            'Downloading map tiles…')),
                         const SizedBox(height: 8),
                         LinearProgressIndicator(value: _offlineProgress),
                       ])),
@@ -742,18 +759,19 @@ class _FieldMapPageState extends State<FieldMapPage> {
                     Padding(
                       padding: const EdgeInsets.only(bottom: 8),
                       child: Row(children: [
-                        const Icon(Icons.directions_walk,
-                            color: Color(0xFFC62828), size: 19),
+                        Icon(Icons.directions_walk,
+                            color: AppSettings.instance.primaryColor, size: 19),
                         const SizedBox(width: 7),
                         Expanded(
                           child: Text(
-                            'Punto ${(_nextRouteIndex + 1).clamp(1, _route.length)} de ${_route.length} · ${_nextPointMeters?.toStringAsFixed(0) ?? '—'} m · rumbo ${_nextPointBearing?.toStringAsFixed(0) ?? '—'}° · ${_offRouteMeters != null && _offRouteMeters! > 15 ? 'fuera de ruta ${_offRouteMeters!.toStringAsFixed(0)} m' : 'siguiendo la ruta'}',
+                            '${appText(context, 'Punto', 'Point')} ${(_nextRouteIndex + 1).clamp(1, _route.length)} ${appText(context, 'de', 'of')} ${_route.length} · ${_nextPointMeters?.toStringAsFixed(0) ?? '—'} m · ${appText(context, 'rumbo', 'heading')} ${_nextPointBearing?.toStringAsFixed(0) ?? '—'}° · ${_offRouteMeters != null && _offRouteMeters! > 15 ? '${appText(context, 'fuera de ruta', 'off route')} ${_offRouteMeters!.toStringAsFixed(0)} m' : appText(context, 'siguiendo la ruta', 'on route')}',
                             style: const TextStyle(
                                 fontSize: 11, fontWeight: FontWeight.w700),
                           ),
                         ),
                         IconButton(
-                          tooltip: 'Detener guía de ruta',
+                          tooltip: appText(context, 'Detener guía de ruta',
+                              'Stop route guidance'),
                           visualDensity: VisualDensity.compact,
                           onPressed: _stopRouteGuidance,
                           icon: const Icon(Icons.close),
@@ -766,8 +784,10 @@ class _FieldMapPageState extends State<FieldMapPage> {
                         enabled: !_recording,
                         controller: _routeNameController,
                         onChanged: (value) => _routeName = value,
-                        decoration: const InputDecoration(
-                            labelText: 'Nombre de ruta', isDense: true),
+                        decoration: InputDecoration(
+                            labelText: appText(
+                                context, 'Nombre de ruta', 'Route name'),
+                            isDense: true),
                       ),
                     ),
                     const SizedBox(width: 10),
@@ -785,23 +805,27 @@ class _FieldMapPageState extends State<FieldMapPage> {
                         style: FilledButton.styleFrom(
                             backgroundColor: _recording
                                 ? const Color(0xFF263746)
-                                : const Color(0xFFC62828)),
+                                : AppSettings.instance.primaryColor),
                         icon: Icon(_recording
                             ? Icons.stop
                             : Icons.fiber_manual_record),
-                        label: Text(
-                            _recording ? 'Detener ruta' : 'Grabar caminata'),
+                        label: Text(_recording
+                            ? appText(context, 'Detener ruta', 'Stop route')
+                            : appText(
+                                context, 'Grabar caminata', 'Record walk')),
                       ),
                     ),
                     const SizedBox(width: 8),
                     IconButton.filledTonal(
-                      tooltip: 'Agregar foto en este punto',
+                      tooltip: appText(context, 'Agregar foto en este punto',
+                          'Add photo at this point'),
                       onPressed: _captureReferencePhoto,
                       icon: const Icon(Icons.add_a_photo_outlined),
                     ),
                     const SizedBox(width: 4),
                     IconButton.filledTonal(
-                      tooltip: 'Compartir ruta KMZ con fotos',
+                      tooltip: appText(context, 'Compartir ruta KMZ con fotos',
+                          'Share route KMZ with photos'),
                       onPressed: _route.length >= 2 ? _exportKmz : null,
                       icon: const Icon(Icons.share_outlined),
                     ),
@@ -819,8 +843,10 @@ class _FieldMapPageState extends State<FieldMapPage> {
                               ? Icons.stop_circle_outlined
                               : Icons.directions_walk),
                           label: Text(_navigatingRoute
-                              ? 'Detener guía de ruta'
-                              : 'Guiarme por esta ruta'),
+                              ? appText(context, 'Detener guía de ruta',
+                                  'Stop route guidance')
+                              : appText(context, 'Guiarme por esta ruta',
+                                  'Guide me along this route')),
                         ),
                       ),
                     ),
@@ -831,16 +857,20 @@ class _FieldMapPageState extends State<FieldMapPage> {
                         onPressed: _showPhotoGallery,
                         icon:
                             const Icon(Icons.photo_library_outlined, size: 16),
-                        label: Text('${_photos.length} fotos · Ver galería'),
+                        label: Text(
+                            '${_photos.length} ${appText(context, 'fotos · Ver galería', 'photos · View gallery')}'),
                       ),
                     ),
-                  const Padding(
+                  Padding(
                     padding: EdgeInsets.only(top: 7),
                     child: Text(
-                        'Mapas © OpenFreeMap / OpenStreetMap · Los paquetes offline requieren la app instalable Android/iOS.',
+                        appText(
+                            context,
+                            'Mapas © OpenFreeMap / OpenStreetMap · Los paquetes offline requieren la app instalable Android/iOS.',
+                            'Maps © OpenFreeMap / OpenStreetMap · Offline packages require the installable Android/iOS app.'),
                         textAlign: TextAlign.center,
-                        style:
-                            TextStyle(fontSize: 10, color: Color(0xFF66736B))),
+                        style: const TextStyle(
+                            fontSize: 10, color: Color(0xFF66736B))),
                   ),
                 ]),
               ),
