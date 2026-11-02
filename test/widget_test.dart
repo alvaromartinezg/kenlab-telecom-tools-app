@@ -18,5 +18,6 @@ void main() {
     expect(find.text('Cámara de campo'), findsOneWidget);
     expect(find.text('Fibra óptica'), findsOneWidget);
     expect(find.text('Mantenimiento'), findsOneWidget);
+    expect(find.text('Probar alineación beta'), findsNothing);
   });
 }

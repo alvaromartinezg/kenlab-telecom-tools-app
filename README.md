@@ -40,15 +40,17 @@ No se migrará Python a Go salvo que mediciones de rendimiento demuestren una ne
 
 ### Beta funcional en curso
 
-La siguiente beta incorpora una pantalla de arranque roja con el monograma K/A de KenLab y luego abre el menú de herramientas. La primera cámara y pantalla de alineación son flujos locales de prueba:
+Al iniciar, el navegador conserva el fondo rojo mientras Flutter carga y muestra una sola vez la pantalla de KenLab de la aplicación; después abre un menú general de herramientas, sin recomendar alineación como acción predeterminada. La cámara y la alineación siguen siendo una beta local:
 
 - **Cámara de campo:** vista en vivo de la cámara trasera, lectura de GPS, altitud y precisión, fecha/hora y descripción opcional. Al capturar, incrusta esos datos en la parte inferior de la imagen y permite descargarla como JPG. Si el GPS no está permitido, la foto puede capturarse, pero se identifica que no tiene ubicación.
-- **Alineación beta:** abre la cámara y consulta la ubicación de Site A. El técnico introduce latitud/longitud de Site B; la app calcula azimut y distancia, dibuja una guía direccional con el rumbo magnético del teléfono cuando está disponible, e incluye inclinómetro del dispositivo y tilt geométrico.
+- **Alineación beta:** abre la cámara y consulta la ubicación de Site A. El técnico introduce o pega latitud/longitud de Site B; la app calcula azimut y distancia, dibuja una guía direccional con el rumbo magnético del teléfono cuando está disponible, e incluye inclinómetro del dispositivo y tilt geométrico.
+- **Alineamiento guiado:** presenta tres pasos en orden: inclinación lateral con el teléfono acostado, tilt con el teléfono parado y azimut. Después muestra el alineamiento fino; el estado solo pasa a verde si los tres errores están dentro de las tolerancias beta configuradas (lateral ±1.5°, tilt ±1° y azimut ±2°). Esas tolerancias aún requieren validación en campo y los sensores del teléfono no sustituyen el nivel ni las mediciones del radio.
+- **MW Profile:** existe un cliente HTTP configurable que envía las coordenadas y alturas de antena de ambos extremos, y muestra el perfil de terreno, la línea de vista y la zona de Fresnel devueltos por la API. Hasta que se configure el dominio, la beta conserva azimut/distancia locales y usa una consulta pública de elevación como alternativa.
 - Para calcular el tilt de enlace se usa la altitud capturada para A, la elevación de terreno de B consultada por sus coordenadas y la altura de antena de ambos extremos. La altitud GPS y la elevación de terreno son aproximadas y deben confirmarse.
 - El control **Conectar técnico** muestra el punto de entrada al flujo colaborativo, pero no conecta todavía dos dispositivos: requiere implementar y desplegar la API de sesiones y WebSockets descrita en la arquitectura.
 - Esta beta aún no sincroniza datos entre técnicos ni conserva una biblioteca interna de fotos. La cámara de campo descarga sus JPG; las fotos de una ruta se empaquetan en el KMZ.
 
-La pantalla actualizada de **Mapa de trabajo** usa MapLibre con vista inclinada 3D por defecto. Permite grabar una caminata con GPS, asociar fotos a coordenadas durante la grabación, exportar el trazo y las fotos incrustadas a KMZ, e importar un KMZ para mostrar su línea y referencias fotográficas. El soporte de paquetes de teselas offline de MapLibre funciona en las versiones nativas Android/iOS; MapLibre Web no implementa descargas de regiones, por lo que el botón de PWA informa esa limitación. El trazo y sus fotos se conservan en memoria hasta exportarlos; no hay biblioteca persistente ni sincronización multiusuario todavía.
+La pantalla de **Mapa de trabajo** usa MapLibre con vista inclinada 3D por defecto y control para alternar a 2D. Permite grabar una caminata con GPS, asociar fotos y comentarios a coordenadas durante la grabación, exportar la ruta y fotos incrustadas a KMZ, e importar un KMZ de otro técnico para ver la ruta y abrir las fotos/comentarios en una galería. Se puede iniciar una guía GPS que indica el siguiente punto, rumbo y distancia aproximada, y advierte si el usuario se aleja de la traza. El soporte de paquetes de teselas offline de MapLibre funciona en las versiones nativas Android/iOS; MapLibre Web no implementa descargas de regiones, por lo que el botón de PWA informa esa limitación. El trazo y sus fotos se conservan en memoria hasta exportarlos; no hay biblioteca persistente ni sincronización multiusuario todavía.
 
 Al ingresar o pegar las coordenadas de Site B, la elevación del terreno se consulta automáticamente a Open-Meteo. Se necesita conexión para esa consulta y se envían las coordenadas a ese servicio. Si no hay red, los cálculos de azimut/distancia continúan, pero el tilt espera la elevación.
 
@@ -101,7 +103,62 @@ Field Map representa la sesión, los extremos y las fotos georreferenciadas. Al 
 
 ### MW Profile
 
-El módulo integrará la API existente de MW Profile para generar perfil topográfico y zona de Fresnel. El contrato API, los parámetros, tratamiento de errores, unidades y representación de resultados se revisarán antes de implementar el cliente. La app vinculará el perfil a la sesión de enlace.
+La app envía una petición HTTP `POST` con `Content-Type: application/json`. La URL se configura en compilación para no fijar un dominio antes de que André lo comparta:
+
+```bash
+flutter build web \
+  --dart-define=MW_PROFILE_API_BASE_URL=https://dominio-de-la-api \
+  --dart-define=MW_PROFILE_API_PATH=/api/v1/line-of-sight/profile
+```
+
+`MW_PROFILE_API_PATH` es opcional si la API usa la ruta por defecto. La función cliente ya está implementada en `lib/features/mw_profile/data/mw_profile_api.dart`; para conectar el servicio real faltará configurar el dominio/ruta y confirmar que la API acepta y devuelve este contrato. Si tu API usa nombres o estructuras diferentes, se ajustará el adaptador cuando compartas su documentación o un ejemplo real.
+
+El endpoint debe publicarse por HTTPS y habilitar CORS para el origen donde se aloje la PWA, permitiendo `POST`, `OPTIONS` y el encabezado `Content-Type`. Puede responder `400` o `422` con un JSON como `{"detail":"coordenada fuera de rango"}` cuando la entrada no sea válida. La app muestra errores HTTP o de formato y no considera un perfil recibido hasta validar todos sus campos obligatorios.
+
+**Entrada propuesta y esperada** — latitud y longitud en grados decimales WGS84; `height_m` es la altura de la antena sobre el terreno, en metros y debe ser cero o positiva. Se aceptan latitudes negativas (sur) y longitudes negativas (oeste). La API debe validar latitud en `[-90, 90]` y longitud en `[-180, 180]`.
+
+```json
+{
+  "site_a": { "lat": -12.0464, "long": -77.0428, "height_m": 30.0 },
+  "site_b": { "lat": -12.0501, "long": -77.0302, "height_m": 24.0 }
+}
+```
+
+**Salida propuesta y esperada** — un objeto JSON directo con elevaciones del terreno sobre el nivel medio del mar, distancia horizontal, azimuts desde cada extremo, tilt geométrico de cada antena y muestras del perfil. Cada muestra contiene la distancia desde Site A, elevación de terreno y altitud de la línea de vista; el radio de Fresnel es opcional si el servicio lo calcula.
+
+```json
+{
+  "distance_m": 1420.7,
+  "azimuth_a_deg": 106.2,
+  "azimuth_b_deg": 286.2,
+  "site_a_ground_altitude_m": 154.8,
+  "site_b_ground_altitude_m": 162.1,
+  "tilt_a_deg": 0.29,
+  "tilt_b_deg": -0.29,
+  "profile": [
+    {
+      "distance_m": 0.0,
+      "terrain_altitude_m": 154.8,
+      "line_of_sight_altitude_m": 184.8,
+      "fresnel_radius_m": 0.0
+    },
+    {
+      "distance_m": 710.4,
+      "terrain_altitude_m": 158.2,
+      "line_of_sight_altitude_m": 173.7,
+      "fresnel_radius_m": 10.3
+    },
+    {
+      "distance_m": 1420.7,
+      "terrain_altitude_m": 162.1,
+      "line_of_sight_altitude_m": 186.1,
+      "fresnel_radius_m": 0.0
+    }
+  ]
+}
+```
+
+`profile` debe traer al menos dos puntos para dibujar la gráfica. `fresnel_radius_m` puede omitirse o ser `null`; cuando está presente se grafica una envolvente alrededor de la línea de vista. Los campos numéricos usan grados o metros tal como indica su sufijo. Ante respuestas HTTP fuera de `2xx`, JSON inválido o campos requeridos faltantes, la aplicación muestra el error y conserva los cálculos locales de azimut y distancia. La integración permite consultar elevación, perfil y tilt con coordenadas confirmadas, sin pedir una altitud manual para Site B.
 
 ## Módulos de fibra óptica
 
@@ -166,7 +223,7 @@ El ingreso real depende de adopción, impresiones efectivamente monetizadas, reg
 
 La estimación inicial de unas dos semanas de desarrollo dedicado se refiere a una PWA colaborativa básica y es orientativa. Fotos, operación sin conexión, exportación, controles de seguridad, integración API y validación en campo requieren planificación y pruebas adicionales.
 
-## Estructura inicial del código
+## Estructura del código
 
 ```text
 lib/
@@ -192,7 +249,7 @@ test/
   features/                     pruebas agrupadas por módulo
 ```
 
-Los archivos de módulo se crean como puntos de partida vacíos. No contienen todavía reglas de negocio, interfaces funcionales ni integraciones. Se implementarán incrementalmente siguiendo este documento y se ajustará la estructura si las decisiones técnicas lo requieren.
+La aplicación ya contiene las pantallas beta de inicio, cámara, alineación, perfil MW y mapa de trabajo. La estructura separa navegación, servicios comunes y módulos de producto; las sesiones WebSocket, Crew Assist, mantenimiento, y las herramientas de fibra aún están en diseño y no deben interpretarse como funciones listas por aparecer en el árbol.
 
 ## Desarrollo y CI
 

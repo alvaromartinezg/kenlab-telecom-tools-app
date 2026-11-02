@@ -82,12 +82,7 @@ class HomeScreen extends StatelessWidget {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
               children: [
-                _WelcomeCard(
-                  onTap: () =>
-                      Navigator.of(context).push(MaterialPageRoute<void>(
-                    builder: (_) => const AlignmentPage(),
-                  )),
-                ),
+                const _WelcomeCard(),
                 const SizedBox(height: 28),
                 Text('Herramientas de campo',
                     style: Theme.of(context)
@@ -145,8 +140,7 @@ class HomeScreen extends StatelessWidget {
 }
 
 class _WelcomeCard extends StatelessWidget {
-  const _WelcomeCard({required this.onTap});
-  final VoidCallback onTap;
+  const _WelcomeCard();
 
   @override
   Widget build(BuildContext context) => Container(
@@ -172,15 +166,6 @@ class _WelcomeCard extends StatelessWidget {
           const Text(
               'Coordina tus trabajos de telecomunicaciones desde el teléfono.',
               style: TextStyle(color: Color(0xFFECEFF1), height: 1.4)),
-          const SizedBox(height: 20),
-          FilledButton.icon(
-            onPressed: onTap,
-            style: FilledButton.styleFrom(
-                backgroundColor: Colors.white,
-                foregroundColor: const Color(0xFF263746)),
-            icon: const Icon(Icons.my_location),
-            label: const Text('Probar alineación beta'),
-          ),
         ]),
       );
 }
