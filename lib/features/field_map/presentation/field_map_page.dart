@@ -1,9 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'package:archive/archive.dart';
 import 'package:camera/camera.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:file_saver/file_saver.dart';
@@ -13,7 +11,8 @@ import 'package:geolocator/geolocator.dart';
 import 'package:image/image.dart' as img;
 import 'package:maplibre_gl/maplibre_gl.dart' as ml;
 import 'package:share_plus/share_plus.dart';
-import 'package:xml/xml.dart';
+
+import '../domain/kmz_route_codec.dart';
 
 class FieldMapPage extends StatefulWidget {
   const FieldMapPage({super.key});
@@ -393,27 +392,26 @@ class _FieldMapPageState extends State<FieldMapPage> {
       _message('Graba al menos dos ubicaciones para crear la ruta KMZ.');
       return;
     }
-    final name = _xmlEscape(
-        _routeName.trim().isEmpty ? 'Ruta KenLab' : _routeName.trim());
-    final coordinates = _route
-        .map((point) =>
-            '${point.longitude.toStringAsFixed(7)},${point.latitude.toStringAsFixed(7)},${point.altitude.toStringAsFixed(1)}')
-        .join(' ');
-    final placemarks = StringBuffer();
-    final archive = Archive();
-    for (var index = 0; index < _photos.length; index++) {
-      final photo = _photos[index];
-      final imagePath = 'photos/reference_${index + 1}.jpg';
-      archive.addFile(ArchiveFile(imagePath, photo.bytes.length, photo.bytes));
-      final comment = _htmlEscape(photo.comment.trim());
-      placemarks.write(
-          '''<Placemark><name>Foto ${index + 1}</name><description><![CDATA[<img src="$imagePath" width="640"/><br/>Capturada: ${photo.capturedAt.toIso8601String()}${comment.isEmpty ? '' : '<br/>Comentario: $comment'}]]></description><Style><IconStyle><Icon><href>https://maps.google.com/mapfiles/kml/shapes/camera.png</href></Icon></IconStyle></Style><Point><altitudeMode>absolute</altitudeMode><coordinates>${photo.longitude},${photo.latitude},${photo.altitude}</coordinates></Point></Placemark>''');
-    }
-    final kml =
-        '''<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>$name</name><description>Ruta grabada con KenLab. Incluye ${_route.length} puntos y ${_photos.length} fotos.</description><Placemark><name>$name</name><Style><LineStyle><color>ff2828c6</color><width>5</width></LineStyle></Style><LineString><tessellate>1</tessellate><altitudeMode>absolute</altitudeMode><coordinates>$coordinates</coordinates></LineString></Placemark>$placemarks</Document></kml>''';
-    final kmlBytes = utf8.encode(kml);
-    archive.addFile(ArchiveFile('doc.kml', kmlBytes.length, kmlBytes));
-    final kmz = Uint8List.fromList(ZipEncoder().encode(archive));
+    final kmz = KmzRouteCodec.encode(KmzRouteData(
+      name: _routeName,
+      points: _route
+          .map((point) => KmzRouteCoordinate(
+                latitude: point.latitude,
+                longitude: point.longitude,
+                altitudeMeters: point.altitude,
+              ))
+          .toList(growable: false),
+      photos: _photos
+          .map((photo) => KmzRoutePhoto(
+                latitude: photo.latitude,
+                longitude: photo.longitude,
+                altitudeMeters: photo.altitude,
+                capturedAt: photo.capturedAt,
+                bytes: photo.bytes,
+                comment: photo.comment,
+              ))
+          .toList(growable: false),
+    ));
     final fileName = '${_safeFileName(_routeName)}.kmz';
     try {
       if (kIsWeb) {
@@ -440,102 +438,34 @@ class _FieldMapPageState extends State<FieldMapPage> {
   Future<void> _importKmz() async {
     try {
       final files = await FilePicker.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['kmz'],
+        dialogTitle: 'Selecciona una ruta KMZ de KenLab',
+        type: FileType.any,
       );
       if (files.isEmpty) return;
-      final bytes = await files.single.readAsBytes();
-      final archive = ZipDecoder().decodeBytes(bytes);
-      final kmlFile = archive.files
-          .where((file) => file.name.toLowerCase().endsWith('.kml'))
-          .firstOrNull;
-      if (kmlFile == null)
-        throw Exception('El KMZ no contiene un archivo KML.');
-      final document = XmlDocument.parse(utf8.decode(kmlFile.content));
-      final lineCoordinates = document
-          .findAllElements('LineString')
-          .expand((element) => element.findAllElements('coordinates'))
-          .map((element) => element.innerText)
-          .firstOrNull;
-      if (lineCoordinates == null)
-        throw Exception('No se encontró una ruta en el KMZ.');
-      final importedPoints = <_RoutePoint>[];
-      for (final tuple in lineCoordinates.trim().split(RegExp(r'\s+'))) {
-        final values = tuple.split(',');
-        if (values.length < 2) continue;
-        final lon = double.tryParse(values[0]);
-        final lat = double.tryParse(values[1]);
-        final alt = values.length > 2 ? double.tryParse(values[2]) ?? 0.0 : 0.0;
-        if (lat != null && lon != null)
-          importedPoints.add(_RoutePoint(
-            latitude: lat,
-            longitude: lon,
-            altitude: alt,
-            capturedAt: DateTime.now(),
-          ));
+      final imported = KmzRouteCodec.decode(await files.single.readAsBytes());
+      final importedPoints = imported.points
+          .map((point) => _RoutePoint(
+                latitude: point.latitude,
+                longitude: point.longitude,
+                altitude: point.altitudeMeters,
+                capturedAt: DateTime.now(),
+              ))
+          .toList(growable: false);
+      final importedPhotos = imported.photos
+          .map((photo) => _RoutePhoto(
+                latitude: photo.latitude,
+                longitude: photo.longitude,
+                altitude: photo.altitudeMeters,
+                capturedAt: photo.capturedAt,
+                bytes: photo.bytes,
+                comment: photo.comment,
+              ))
+          .toList(growable: false);
+      try {
+        await _clearPhotoSymbols();
+      } catch (_) {
+        _photoSymbols.clear();
       }
-      if (importedPoints.length < 2)
-        throw Exception('La ruta no tiene suficientes puntos.');
-      final importedPhotos = <_RoutePhoto>[];
-      for (final placemark in document.findAllElements('Placemark')) {
-        if (!placemark.findAllElements('Point').isNotEmpty) continue;
-        final coordinates = placemark
-            .findAllElements('Point')
-            .expand((point) => point.findAllElements('coordinates'))
-            .firstOrNull
-            ?.innerText
-            .trim();
-        if (coordinates == null) continue;
-        final coordinateParts = coordinates.split(',');
-        if (coordinateParts.length < 2) continue;
-        final longitude = double.tryParse(coordinateParts[0]);
-        final latitude = double.tryParse(coordinateParts[1]);
-        final altitude = coordinateParts.length > 2
-            ? double.tryParse(coordinateParts[2]) ?? 0.0
-            : 0.0;
-        final description =
-            placemark.findAllElements('description').firstOrNull?.innerText ??
-                '';
-        final imageMatch = RegExp(
-                r'''(?:src|href)=["']([^"']+\.(?:jpg|jpeg|png))["']''',
-                caseSensitive: false)
-            .firstMatch(description);
-        if (longitude == null || latitude == null || imageMatch == null)
-          continue;
-        final imageHref =
-            Uri.parse(imageMatch.group(1)!).path.replaceAll('\\', '/');
-        final kmlDirectory = kmlFile.name.contains('/')
-            ? kmlFile.name.substring(0, kmlFile.name.lastIndexOf('/') + 1)
-            : '';
-        final candidates = {
-          imageHref.replaceFirst(RegExp(r'^\./'), ''),
-          '$kmlDirectory$imageHref'.replaceFirst(RegExp(r'^\./'), ''),
-          imageHref.split('/').last,
-        };
-        final photoFile = archive.files
-            .where(
-                (file) => candidates.contains(file.name.replaceAll('\\', '/')))
-            .firstOrNull;
-        if (photoFile == null) continue;
-        final commentMatch = RegExp(
-          r'<br\s*/?>\s*Comentario:\s*(.*?)(?:<br\s*/?>|$)',
-          caseSensitive: false,
-          dotAll: true,
-        ).firstMatch(description);
-        final capturedMatch =
-            RegExp(r'Capturada:\s*([^<\r\n]+)').firstMatch(description);
-        importedPhotos.add(_RoutePhoto(
-          latitude: latitude,
-          longitude: longitude,
-          altitude: altitude,
-          capturedAt:
-              DateTime.tryParse(capturedMatch?.group(1)?.trim() ?? '') ??
-                  DateTime.now(),
-          bytes: Uint8List.fromList(photoFile.content),
-          comment: _htmlUnescape(commentMatch?.group(1)?.trim() ?? ''),
-        ));
-      }
-      await _clearPhotoSymbols();
       setState(() {
         _route
           ..clear()
@@ -545,27 +475,26 @@ class _FieldMapPageState extends State<FieldMapPage> {
         _recording = false;
         _navigatingRoute = false;
         _nextRouteIndex = 0;
-        _routeName = document
-                .findAllElements('Document')
-                .firstOrNull
-                ?.findElements('name')
-                .firstOrNull
-                ?.innerText ??
-            'Ruta importada';
+        _routeName = imported.name;
+        _routeNameController.text = imported.name;
         _mapCenter = ml.LatLng(
             importedPoints.first.latitude, importedPoints.first.longitude);
       });
       await _redrawRoute();
       for (final photo in importedPhotos) {
-        final symbol = await _map?.addSymbol(ml.SymbolOptions(
-          geometry: ml.LatLng(photo.latitude, photo.longitude),
-          textField: 'CAM',
-          textSize: 12,
-          textColor: '#C62828',
-          textHaloColor: '#FFFFFF',
-          textHaloWidth: 2,
-        ));
-        if (symbol != null) _photoSymbols.add(symbol);
+        try {
+          final symbol = await _map?.addSymbol(ml.SymbolOptions(
+            geometry: ml.LatLng(photo.latitude, photo.longitude),
+            textField: 'CAM',
+            textSize: 12,
+            textColor: '#C62828',
+            textHaloColor: '#FFFFFF',
+            textHaloWidth: 2,
+          ));
+          if (symbol != null) _photoSymbols.add(symbol);
+        } catch (_) {
+          // The route and gallery remain usable if a map marker cannot load.
+        }
       }
       _moveCamera(_mapCenter);
       _message(
@@ -676,20 +605,6 @@ class _FieldMapPageState extends State<FieldMapPage> {
     ));
   }
 
-  String _xmlEscape(String value) => value
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;');
-  String _htmlEscape(String value) => value
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;');
-  String _htmlUnescape(String value) => value
-      .replaceAll('&lt;', '<')
-      .replaceAll('&gt;', '>')
-      .replaceAll('&quot;', '"')
-      .replaceAll('&#39;', "'")
-      .replaceAll('&amp;', '&');
   String _safeFileName(String value) => value
           .trim()
           .replaceAll(RegExp(r'[^A-Za-z0-9_-]+'), '_')
