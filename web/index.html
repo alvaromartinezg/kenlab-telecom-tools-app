@@ -13,6 +13,49 @@
   </style>
 </head>
 <body>
+  <script>
+    window.kenlabCompass = {
+      requestPermission: async function () {
+        const Orientation = window.DeviceOrientationEvent;
+        if (!Orientation) return 'unsupported';
+        try {
+          const orientationPermission = typeof Orientation.requestPermission === 'function'
+            ? Orientation.requestPermission()
+            : Promise.resolve('granted');
+          const Motion = window.DeviceMotionEvent;
+          const motionPermission = Motion && typeof Motion.requestPermission === 'function'
+            ? Motion.requestPermission()
+            : Promise.resolve('granted');
+          const results = await Promise.all([orientationPermission, motionPermission]);
+          return results.every(result => result === 'granted') ? 'granted' : 'denied';
+        } catch (_) {
+          return 'denied';
+        }
+      },
+      start: function (callback) {
+        const emit = function (event) {
+          const nativeHeading = Number.isFinite(event.webkitCompassHeading)
+            ? event.webkitCompassHeading
+            : null;
+          const absoluteHeading = event.absolute && Number.isFinite(event.alpha)
+            ? ((360 - event.alpha) % 360 + 360) % 360
+            : null;
+          const heading = nativeHeading === null ? absoluteHeading : nativeHeading;
+          callback(heading, event.beta, event.gamma, event.absolute === true);
+        };
+        window.addEventListener('deviceorientation', emit, true);
+        window.addEventListener('deviceorientationabsolute', emit, true);
+        window.__kenlabCompassStop = function () {
+          window.removeEventListener('deviceorientation', emit, true);
+          window.removeEventListener('deviceorientationabsolute', emit, true);
+          window.__kenlabCompassStop = null;
+        };
+      },
+      stop: function () {
+        if (window.__kenlabCompassStop) window.__kenlabCompassStop();
+      }
+    };
+  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
