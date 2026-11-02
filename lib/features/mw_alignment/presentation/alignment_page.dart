@@ -12,6 +12,9 @@ import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
 import '../../../core/location/elevation_service.dart';
+import '../../../core/sensors/device_level_math.dart';
+import '../../../core/settings/app_settings.dart';
+import '../../../core/settings/app_text.dart';
 import '../data/device_orientation_compass.dart';
 import '../../mw_profile/data/mw_profile_api.dart';
 import '../../mw_profile/models/link_profile.dart';
@@ -39,9 +42,15 @@ class _AlignmentPageState extends State<AlignmentPage> {
   double? _heading;
   double? _webTilt;
   double? _webLateral;
+  double? _webGravityX;
+  double? _webGravityY;
+  double? _webGravityZ;
   bool _requestingCompass = false;
   bool _compassPermissionGranted = false;
+  bool _sensorEventsReceived = false;
+  bool _compassHeadingReceived = false;
   String? _compassError;
+  Timer? _sensorTimeout;
   bool _loadingCamera = true;
   bool _useInclinometer = true;
   bool _connectionMode = false;
@@ -87,6 +96,7 @@ class _AlignmentPageState extends State<AlignmentPage> {
     _siteBLon.dispose();
     _elevationDebounce?.cancel();
     _profileDebounce?.cancel();
+    _sensorTimeout?.cancel();
     _siteAAntennaHeight.dispose();
     _siteBAntennaHeight.dispose();
     _connectionCode.dispose();
@@ -126,15 +136,18 @@ class _AlignmentPageState extends State<AlignmentPage> {
   Future<void> _refreshLocation() async {
     try {
       if (!await Geolocator.isLocationServiceEnabled()) {
-        throw Exception('Activa los servicios de ubicación.');
+        throw Exception(appText(context, 'Activa los servicios de ubicación.',
+            'Enable location services.'));
       }
       var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied)
         permission = await Geolocator.requestPermission();
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
-        throw Exception(
-            'Permite ubicación para calcular el rumbo desde Site A.');
+        throw Exception(appText(
+            context,
+            'Permite ubicación para calcular el rumbo desde Site A.',
+            'Allow location access to calculate the bearing from Site A.'));
       }
       final position = await Geolocator.getCurrentPosition(
         locationSettings:
@@ -208,8 +221,11 @@ class _AlignmentPageState extends State<AlignmentPage> {
         setState(() {
           _requestingCompass = false;
           _compassPermissionGranted = false;
-          _compassError =
-              'No se autorizó la orientación. Permítela en Safari y vuelve a intentarlo.';
+          _compassError = appText(
+            context,
+            'No se autorizaron los sensores. Permite el acceso en Safari y vuelve a intentarlo.',
+            'Sensor access was denied. Allow access in Safari and try again.',
+          );
         });
         return;
       }
@@ -217,29 +233,65 @@ class _AlignmentPageState extends State<AlignmentPage> {
       _orientationSubscription = _orientationCompass.start().listen(
         (reading) {
           if (!mounted) return;
+          final receivedData = reading.headingDegrees != null ||
+              reading.tiltDegrees != null ||
+              reading.lateralDegrees != null ||
+              reading.gravityX != null ||
+              reading.gravityY != null ||
+              reading.gravityZ != null;
           setState(() {
             if (reading.headingDegrees != null) {
               _heading = reading.headingDegrees;
             }
             _webTilt = reading.tiltDegrees;
             _webLateral = reading.lateralDegrees;
+            _webGravityX = reading.gravityX;
+            _webGravityY = reading.gravityY;
+            _webGravityZ = reading.gravityZ;
+            _sensorEventsReceived = _sensorEventsReceived || receivedData;
+            _compassHeadingReceived =
+                _compassHeadingReceived || reading.headingDegrees != null;
+            if (receivedData) _compassError = null;
           });
         },
         onError: (Object error) {
           if (mounted)
-            setState(() => _compassError = 'Sensor de orientación: $error');
+            setState(() => _compassError =
+                '${appText(context, 'Error de sensores', 'Sensor error')}: $error');
         },
       );
       setState(() {
         _requestingCompass = false;
         _compassPermissionGranted = true;
+        _sensorEventsReceived = false;
+        _compassHeadingReceived = false;
+      });
+      _sensorTimeout?.cancel();
+      _sensorTimeout = Timer(const Duration(seconds: 5), () {
+        if (!mounted) return;
+        setState(() {
+          _compassError = !_sensorEventsReceived
+              ? appText(
+                  context,
+                  'El navegador permitió el acceso, pero no está enviando lecturas. Revisa los permisos de orientación y movimiento en Safari.',
+                  'Access was allowed, but the browser is not sending sensor readings. Check motion and orientation permissions in Safari.',
+                )
+              : !_compassHeadingReceived
+                  ? appText(
+                      context,
+                      'El inclinómetro recibe datos, pero Safari no entrega rumbo de brújula. Comprueba los permisos de orientación.',
+                      'The level receives data, but Safari is not providing a compass heading. Check orientation permissions.',
+                    )
+                  : null;
+        });
       });
     } catch (error) {
       if (!mounted) return;
       setState(() {
         _requestingCompass = false;
         _compassPermissionGranted = false;
-        _compassError = 'No se pudo habilitar la brújula: $error';
+        _compassError =
+            '${appText(context, 'No se pudieron habilitar los sensores', 'Could not enable sensors')}: $error';
       });
     }
   }
@@ -293,15 +345,13 @@ class _AlignmentPageState extends State<AlignmentPage> {
   }
 
   double? get _lateralAngle {
+    final gravityX = _webGravityX ?? _acceleration?.x;
+    final gravityZ = _webGravityZ ?? _acceleration?.z;
+    final gravityAngle = DeviceLevelMath.sideAngleDegrees(
+        gravityX: gravityX, gravityZ: gravityZ);
+    if (gravityAngle != null) return gravityAngle;
     if (_webLateral != null) return _webLateral;
-    final acceleration = _acceleration;
-    if (acceleration == null) return null;
-    // Use the gravity axis appropriate to the instructed phone orientation:
-    // flat during lateral setup, upright during tilt and fine alignment.
-    final upright = acceleration.y.abs() >= acceleration.z.abs();
-    final across = upright ? acceleration.x : acceleration.y;
-    final vertical = upright ? acceleration.y : acceleration.z;
-    return math.atan2(across, vertical.abs()) * 180 / math.pi;
+    return null;
   }
 
   void _siteBCoordinatesChanged() {
@@ -482,19 +532,27 @@ class _AlignmentPageState extends State<AlignmentPage> {
     final step = _guidedStep;
     if (step == null) return;
     if (step != _GuidedStep.fine && !_stepReady(step)) {
-      _showMessage('Ajusta los valores dentro de tolerancia antes de avanzar.');
+      _showMessage(appText(
+          context,
+          'Ajusta los valores dentro de tolerancia antes de avanzar.',
+          'Bring the readings within tolerance before moving on.'));
       return;
     }
     final renderObject = _guidedCaptureKey.currentContext?.findRenderObject();
     if (renderObject is! RenderRepaintBoundary) {
-      _showMessage('No se pudo capturar esta pantalla. Inténtalo de nuevo.');
+      _showMessage(appText(
+          context,
+          'No se pudo capturar el reporte. Inténtalo de nuevo.',
+          'Could not capture the report. Try again.'));
       return;
     }
     ui.Image? image;
     try {
       image = await renderObject.toImage(pixelRatio: 2);
       final data = await image.toByteData(format: ui.ImageByteFormat.png);
-      if (data == null) throw Exception('No se pudo codificar la captura PNG.');
+      if (data == null)
+        throw Exception(appText(context, 'No se pudo codificar el reporte PNG.',
+            'Could not encode the PNG report.'));
       final now = DateTime.now();
       final bytes = data.buffer.asUint8List(
         data.offsetInBytes,
@@ -502,7 +560,7 @@ class _AlignmentPageState extends State<AlignmentPage> {
       );
       await FileSaver.instance.saveFile(
         name:
-            'KenLab_${step.name}_${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}${now.second.toString().padLeft(2, '0')}',
+            'AlignmentReport_${step.name}_${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}${now.second.toString().padLeft(2, '0')}',
         bytes: bytes,
         fileExtension: 'png',
         mimeType: MimeType.png,
@@ -510,10 +568,13 @@ class _AlignmentPageState extends State<AlignmentPage> {
       if (!mounted) return;
       if (step != _GuidedStep.fine) _advanceGuidedAlignment();
       _showMessage(step == _GuidedStep.fine
-          ? 'Captura de pantalla guardada.'
-          : 'Captura guardada; avanzaste al siguiente paso.');
+          ? appText(context, 'Reporte guardado.', 'Report saved.')
+          : appText(context, 'Reporte guardado; avanzaste al siguiente paso.',
+              'Report saved; moved to the next step.'));
     } catch (error) {
-      if (mounted) _showMessage('No se pudo guardar la captura: $error');
+      if (mounted)
+        _showMessage(
+            '${appText(context, 'No se pudo guardar el reporte', 'Could not save the report')}: $error');
     } finally {
       image?.dispose();
     }
@@ -537,7 +598,7 @@ class _AlignmentPageState extends State<AlignmentPage> {
     final secondary = dark ? Colors.white70 : const Color(0xFF66736B);
     final errorColor = _azimuthReady
         ? const Color(0xFF198754)
-        : (dark ? const Color(0xFFFF8A80) : const Color(0xFFC62828));
+        : (dark ? const Color(0xFFFF8A80) : AppSettings.instance.primaryColor);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
@@ -547,9 +608,12 @@ class _AlignmentPageState extends State<AlignmentPage> {
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(children: [
-        _azimuthValue('BRÚJULA', _heading, primary, secondary),
-        _azimuthValue('OBJETIVO', _targetAzimuth, primary, secondary),
-        _azimuthValue('DIFERENCIA', _azimuthError, errorColor, secondary,
+        _azimuthValue(appText(context, 'BRÚJULA', 'COMPASS'), _heading, primary,
+            secondary),
+        _azimuthValue(appText(context, 'OBJETIVO', 'TARGET'), _targetAzimuth,
+            primary, secondary),
+        _azimuthValue(appText(context, 'DIFERENCIA', 'DIFFERENCE'),
+            _azimuthError, errorColor, secondary,
             signed: true),
       ]),
     );
@@ -587,41 +651,58 @@ class _AlignmentPageState extends State<AlignmentPage> {
       return FilledButton.icon(
         onPressed: _targetAzimuth == null ? null : _startGuidedAlignment,
         icon: const Icon(Icons.assistant_direction),
-        label: const Text('Iniciar alineamiento guiado'),
+        label: Text(appText(
+            context, 'Iniciar alineamiento guiado', 'Start guided alignment')),
       );
     }
 
     final (title, instruction, measured, target, tolerance, ready) =
         switch (step) {
       _GuidedStep.lateral => (
-          '1 / 3 · Inclinación lateral',
-          'Pon el teléfono acostado, pantalla hacia arriba, sobre una superficie horizontal del soporte. Ajusta el lateral a 0°.',
+          appText(context, '1 / 3 · Inclinación lateral',
+              '1 / 3 · Side-to-side level'),
+          appText(
+              context,
+              'Pon el teléfono acostado, pantalla hacia arriba, sobre una superficie horizontal del soporte. Ajusta el lateral a 0°.',
+              'Place the phone flat, screen up, on a horizontal surface of the mount. Adjust the side level to 0°.'),
           _lateralAngle,
           0.0,
           _lateralTolerance,
           _lateralReady,
         ),
       _GuidedStep.tilt => (
-          '2 / 3 · Tilt vertical',
-          'Ahora coloca el teléfono parado, alineado con el eje de la antena. Ajusta el tilt calculado.',
+          appText(context, '2 / 3 · Tilt vertical', '2 / 3 · Vertical tilt'),
+          appText(
+              context,
+              'Ahora coloca el teléfono parado, alineado con el eje de la antena. Ajusta el tilt calculado.',
+              'Hold the phone upright along the antenna axis. Adjust it to the calculated tilt.'),
           _pitch,
           _tilt,
           _tiltTolerance,
           _tiltReady,
         ),
       _GuidedStep.azimuth => (
-          '3 / 3 · Azimut',
-          'Mantén el teléfono parado y apunta su parte superior hacia el azimut objetivo.',
+          appText(context, '3 / 3 · Azimut', '3 / 3 · Azimuth'),
+          appText(
+              context,
+              'Mantén el teléfono parado y apunta su parte superior hacia el azimut objetivo.',
+              'Hold the phone upright and point its top edge toward the target azimuth.'),
           _heading,
           _targetAzimuth,
           _azimuthTolerance,
           _azimuthReady,
         ),
       _GuidedStep.fine => (
-          'Alineamiento fino',
+          appText(context, 'Alineamiento fino', 'Fine alignment'),
           _fineAligned
-              ? 'Valores dentro de las tolerancias beta. Confirma el nivel del radio antes de cerrar el trabajo.'
-              : 'Ajusta lateral, tilt y azimut. El indicador solo se pondrá verde cuando los tres estén dentro de tolerancia.',
+              ? appText(
+                  context,
+                  'Valores dentro de las tolerancias beta. Confirma el nivel del radio antes de cerrar el trabajo.',
+                  'Readings are within beta tolerances. Confirm the radio level before finishing the job.')
+              : appText(
+                  context,
+                  'Ajusta lateral, tilt y azimut. El indicador solo se pondrá verde cuando los tres estén dentro de tolerancia.',
+                  'Adjust side level, tilt and azimuth. The indicator turns green only when all three are within tolerance.'),
           null,
           null,
           0.0,
@@ -634,12 +715,13 @@ class _AlignmentPageState extends State<AlignmentPage> {
         : step == _GuidedStep.azimuth
             ? _angularError(measured, target)
             : measured - target;
+    final displayedDifference = difference ?? 0;
     final background = step == _GuidedStep.fine
         ? (_fineAligned ? const Color(0xFFE4F4E9) : const Color(0xFFFFECEC))
         : Colors.white;
     final accent = step == _GuidedStep.fine && _fineAligned
         ? const Color(0xFF198754)
-        : const Color(0xFFC62828);
+        : AppSettings.instance.primaryColor;
 
     return RepaintBoundary(
       key: _guidedCaptureKey,
@@ -650,6 +732,8 @@ class _AlignmentPageState extends State<AlignmentPage> {
           padding: const EdgeInsets.all(14),
           child:
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            _alignmentReportHeader(),
+            const SizedBox(height: 10),
             Row(children: [
               Icon(
                   step == _GuidedStep.fine
@@ -664,7 +748,7 @@ class _AlignmentPageState extends State<AlignmentPage> {
               if (step != _GuidedStep.fine)
                 IconButton(
                     onPressed: () => setState(() => _guidedStep = null),
-                    tooltip: 'Salir de guía',
+                    tooltip: appText(context, 'Salir de guía', 'Exit guide'),
                     icon: const Icon(Icons.close)),
             ]),
             Text(instruction,
@@ -677,10 +761,13 @@ class _AlignmentPageState extends State<AlignmentPage> {
                     ? Icons.explore
                     : Icons.explore_outlined),
                 label: Text(_requestingCompass
-                    ? 'Solicitando acceso…'
+                    ? appText(
+                        context, 'Solicitando acceso…', 'Requesting access…')
                     : _compassPermissionGranted
-                        ? 'Volver a activar brújula'
-                        : 'Permitir acceso a la brújula'),
+                        ? appText(context, 'Volver a activar sensores',
+                            'Reactivate sensors')
+                        : appText(context, 'Permitir acceso a sensores',
+                            'Allow sensor access')),
               ),
               if (_compassError != null)
                 Padding(
@@ -690,26 +777,46 @@ class _AlignmentPageState extends State<AlignmentPage> {
                           color: Color(0xFF9B2C2C), fontSize: 11)),
                 ),
             ],
+            if (step == _GuidedStep.lateral || step == _GuidedStep.tilt) ...[
+              const SizedBox(height: 12),
+              _BubbleLevelGauge(
+                angle: step == _GuidedStep.lateral
+                    ? _lateralAngle
+                    : (_pitch == null || _tilt == null
+                        ? null
+                        : _pitch! - _tilt!),
+                tolerance: tolerance,
+                label: appText(
+                  context,
+                  step == _GuidedStep.lateral
+                      ? 'Nivel lateral'
+                      : 'Nivel de inclinación',
+                  step == _GuidedStep.lateral ? 'Side level' : 'Tilt level',
+                ),
+              ),
+            ],
             if (step == _GuidedStep.azimuth || step == _GuidedStep.fine) ...[
               const SizedBox(height: 10),
               _azimuthReadout(),
             ],
             if (step == _GuidedStep.fine) ...[
               const SizedBox(height: 10),
-              _fineMetric(
-                  'Lateral', _lateralAngle, _lateralTolerance, _lateralReady),
+              _fineMetric(appText(context, 'Lateral', 'Side level'),
+                  _lateralAngle, _lateralTolerance, _lateralReady),
               _fineMetric(
                   'Tilt',
                   _pitch == null || _tilt == null ? null : _pitch! - _tilt!,
                   _tiltTolerance,
                   _tiltReady),
-              _fineMetric(
-                  'Azimut', _azimuthError, _azimuthTolerance, _azimuthReady),
+              _fineMetric(appText(context, 'Azimut', 'Azimuth'), _azimuthError,
+                  _azimuthTolerance, _azimuthReady),
               const SizedBox(height: 6),
               Text(
                   _fineAligned
-                      ? 'LISTO PARA COMPROBACIÓN DEL RADIO'
-                      : 'AJUSTE PENDIENTE',
+                      ? appText(context, 'LISTO PARA COMPROBACIÓN DEL RADIO',
+                          'READY FOR RADIO CHECK')
+                      : appText(
+                          context, 'AJUSTE PENDIENTE', 'ADJUSTMENT PENDING'),
                   style: TextStyle(
                       fontWeight: FontWeight.w900,
                       color: accent,
@@ -718,8 +825,12 @@ class _AlignmentPageState extends State<AlignmentPage> {
               const SizedBox(height: 10),
               Text(
                 measured == null || target == null
-                    ? 'Esperando sensor o valores objetivo…'
-                    : 'Medido ${measured.toStringAsFixed(1)}°  ·  Objetivo ${target.toStringAsFixed(1)}°  ·  Error ${difference!.abs().toStringAsFixed(1)}° (±${tolerance.toStringAsFixed(1)}°)',
+                    ? appText(context, 'Esperando sensor o valores objetivo…',
+                        'Waiting for sensor data or target values…')
+                    : appText(
+                        context,
+                        'Medido ${measured.toStringAsFixed(1)}°  ·  Objetivo ${target.toStringAsFixed(1)}°  ·  Error ${displayedDifference.abs().toStringAsFixed(1)}° (±${tolerance.toStringAsFixed(1)}°)',
+                        'Measured ${measured.toStringAsFixed(1)}°  ·  Target ${target.toStringAsFixed(1)}°  ·  Error ${displayedDifference.abs().toStringAsFixed(1)}° (±${tolerance.toStringAsFixed(1)}°)'),
                 style: const TextStyle(fontWeight: FontWeight.w700),
               ),
               const SizedBox(height: 8),
@@ -727,8 +838,8 @@ class _AlignmentPageState extends State<AlignmentPage> {
                 width: double.infinity,
                 child: FilledButton.icon(
                   onPressed: ready ? _captureGuidedStep : null,
-                  icon: const Icon(Icons.screenshot_outlined),
-                  label: const Text('Capturar pantalla y continuar'),
+                  icon: const Icon(Icons.arrow_forward_rounded),
+                  label: Text(appText(context, 'Siguiente paso', 'Next step')),
                 ),
               ),
             ],
@@ -739,13 +850,17 @@ class _AlignmentPageState extends State<AlignmentPage> {
                 child: OutlinedButton.icon(
                   onPressed: _captureGuidedStep,
                   icon: const Icon(Icons.screenshot_outlined),
-                  label: const Text('Guardar captura de pantalla'),
+                  label:
+                      Text(appText(context, 'Guardar reporte', 'Save report')),
                 ),
               ),
             ],
-            const Text(
-                'Tolerancias beta: lateral ±1.5°, tilt ±1°, azimut ±2°. La brújula puede desviarse por metal y no sustituye la lectura del radio.',
-                style: TextStyle(fontSize: 10, color: Color(0xFF66736B))),
+            Text(
+                appText(
+                    context,
+                    'Tolerancias beta: lateral ±1.5°, tilt ±1°, azimut ±2°. La brújula puede desviarse por metal y no sustituye la lectura del radio.',
+                    'Beta tolerances: side ±1.5°, tilt ±1°, azimuth ±2°. Metal structures can affect compass readings; always confirm using the radio.'),
+                style: const TextStyle(fontSize: 10, color: Color(0xFF66736B))),
           ]),
         ),
       ),
@@ -759,23 +874,72 @@ class _AlignmentPageState extends State<AlignmentPage> {
         child: Row(children: [
           Icon(ready ? Icons.check_circle : Icons.radio_button_unchecked,
               size: 17,
-              color: ready ? const Color(0xFF198754) : const Color(0xFFC62828)),
+              color: ready
+                  ? const Color(0xFF198754)
+                  : AppSettings.instance.primaryColor),
           const SizedBox(width: 7),
           Expanded(
               child: Text(
-                  '$label · ${error == null ? 'sensor no disponible' : 'error ${error.abs().toStringAsFixed(1)}° / ±${tolerance.toStringAsFixed(1)}°'}')),
+                  '$label · ${error == null ? appText(context, 'sensor no disponible', 'sensor unavailable') : appText(context, 'error ${error.abs().toStringAsFixed(1)}° / ±${tolerance.toStringAsFixed(1)}°', 'error ${error.abs().toStringAsFixed(1)}° / ±${tolerance.toStringAsFixed(1)}°')}')),
         ]),
       );
 
+  Widget _alignmentReportHeader() {
+    final now = DateTime.now();
+    final site = _siteA;
+    final company = AppSettings.instance.companyName.trim();
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF3F5F7),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFE1E5E9)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (company.isNotEmpty)
+          Text(company,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  color: AppSettings.instance.primaryColor,
+                  fontWeight: FontWeight.w900,
+                  fontSize: 12)),
+        Row(children: [
+          const Icon(Icons.assignment_outlined,
+              size: 15, color: Color(0xFF63707C)),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              '${appText(context, 'REPORTE DE ALINEACIÓN', 'ALIGNMENT REPORT')} · ${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800),
+            ),
+          ),
+        ]),
+        if (site != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 21, top: 3),
+            child: Text(
+              'Site A  ${site.latitude.toStringAsFixed(6)}, ${site.longitude.toStringAsFixed(6)}  ·  ${site.altitude.toStringAsFixed(1)} m',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 10, color: Color(0xFF66736B)),
+            ),
+          ),
+      ]),
+    );
+  }
+
   double? get _pitch {
-    if (_webTilt != null) return _webTilt;
-    final acceleration = _acceleration;
-    if (acceleration == null) return null;
-    final verticalGravity = acceleration.y;
-    if (verticalGravity.abs() < .01 && acceleration.z.abs() < .01) return null;
-    // With the phone upright, Y follows its long edge and Z is perpendicular
-    // to the screen; this gives the phone's tilt away from vertical.
-    return math.atan2(-acceleration.z, verticalGravity) * 180 / math.pi;
+    final gravityY = _webGravityY ?? _acceleration?.y;
+    final gravityZ = _webGravityZ ?? _acceleration?.z;
+    final gravityAngle = DeviceLevelMath.tiltAngleDegrees(
+        gravityY: gravityY, gravityZ: gravityZ);
+    if (gravityAngle != null) return gravityAngle;
+    if (_webTilt != null) return ((_webTilt! + 180) % 360) - 180;
+    return null;
   }
 
   void _onConnect() {
@@ -794,10 +958,11 @@ class _AlignmentPageState extends State<AlignmentPage> {
     final camera = _camera;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Alineación beta'),
+        title: Text(appText(context, 'Alineación beta', 'Alignment beta')),
         actions: [
           IconButton(
-              tooltip: 'Actualizar GPS',
+              tooltip:
+                  appText(context, 'Actualizar ubicación', 'Refresh location'),
               onPressed: _refreshLocation,
               icon: const Icon(Icons.my_location)),
         ],
@@ -861,9 +1026,16 @@ class _AlignmentPageState extends State<AlignmentPage> {
                         Text(
                             geometry == null
                                 ? (_siteA == null
-                                    ? 'Obteniendo ubicación de Site A…'
-                                    : 'Ingresa las coordenadas de Site B')
-                                : 'AZIMUT OBJETIVO',
+                                    ? appText(
+                                        context,
+                                        'Obteniendo ubicación de Site A…',
+                                        'Getting Site A location…')
+                                    : appText(
+                                        context,
+                                        'Ingresa las coordenadas de Site B',
+                                        'Enter Site B coordinates'))
+                                : appText(context, 'AZIMUT OBJETIVO',
+                                    'TARGET AZIMUTH'),
                             style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 11,
@@ -876,7 +1048,8 @@ class _AlignmentPageState extends State<AlignmentPage> {
                                   fontSize: 25,
                                   fontWeight: FontWeight.w900)),
                         if (geometry != null)
-                          Text('Distancia ${_distanceLabel(targetDistance!)}',
+                          Text(
+                              '${appText(context, 'Distancia', 'Distance')} ${_distanceLabel(targetDistance!)}',
                               style: const TextStyle(
                                   color: Colors.white70, fontSize: 12)),
                         if (geometry != null) ...[
@@ -892,8 +1065,12 @@ class _AlignmentPageState extends State<AlignmentPage> {
                                     foregroundColor: Colors.white),
                                 icon: const Icon(Icons.explore_outlined),
                                 label: Text(_requestingCompass
-                                    ? 'Solicitando acceso…'
-                                    : 'Permitir acceso a la brújula'),
+                                    ? appText(context, 'Solicitando acceso…',
+                                        'Requesting access…')
+                                    : appText(
+                                        context,
+                                        'Permitir acceso a sensores',
+                                        'Allow sensor access')),
                               ),
                             ),
                         ],
@@ -916,29 +1093,33 @@ class _AlignmentPageState extends State<AlignmentPage> {
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
               children: [
                 Row(children: [
-                  const Icon(Icons.my_location,
-                      color: Color(0xFFC62828), size: 19),
+                  Icon(Icons.my_location,
+                      color: AppSettings.instance.primaryColor, size: 19),
                   const SizedBox(width: 8),
                   Expanded(
                       child: Text(_siteA == null
-                          ? 'Site A: ubicación no disponible'
+                          ? appText(context, 'Site A: ubicación no disponible',
+                              'Site A: location unavailable')
                           : 'Site A  ${_siteA!.latitude.toStringAsFixed(6)}, ${_siteA!.longitude.toStringAsFixed(6)}  •  ${_siteA!.altitude.toStringAsFixed(1)} m')),
                   IconButton(
                       onPressed: _refreshLocation,
                       icon: const Icon(Icons.refresh),
-                      tooltip: 'Actualizar GPS'),
+                      tooltip: appText(
+                          context, 'Actualizar ubicación', 'Refresh location')),
                 ]),
                 const SizedBox(height: 4),
                 SegmentedButton<bool>(
-                  segments: const [
+                  segments: [
                     ButtonSegment(
                         value: false,
                         icon: Icon(Icons.edit_location_alt),
-                        label: Text('Coordenadas')),
+                        label: Text(
+                            appText(context, 'Coordenadas', 'Coordinates'))),
                     ButtonSegment(
                         value: true,
                         icon: Icon(Icons.people_outline),
-                        label: Text('Conectar técnico')),
+                        label: Text(appText(context, 'Conectar técnico',
+                            'Connect technician'))),
                   ],
                   selected: {_connectionMode},
                   onSelectionChanged: (values) {
@@ -1010,7 +1191,8 @@ class _AlignmentPageState extends State<AlignmentPage> {
                             'Pega el código del técnico')),
                     const SizedBox(width: 8),
                     FilledButton(
-                        onPressed: _onConnect, child: const Text('Unirse')),
+                        onPressed: _onConnect,
+                        child: Text(appText(context, 'Unirse', 'Join'))),
                   ]),
                   const SizedBox(height: 4),
                   const Text(
@@ -1027,11 +1209,13 @@ class _AlignmentPageState extends State<AlignmentPage> {
                     padding: const EdgeInsets.all(12),
                     child: Column(children: [
                       Row(children: [
-                        const Icon(Icons.screen_rotation_alt,
-                            color: Color(0xFFC62828)),
+                        Icon(Icons.screen_rotation_alt,
+                            color: AppSettings.instance.primaryColor),
                         const SizedBox(width: 8),
-                        const Expanded(
-                            child: Text('Inclinómetro experimental',
+                        Expanded(
+                            child: Text(
+                                appText(context, 'Nivel del teléfono',
+                                    'Phone level'),
                                 style: TextStyle(fontWeight: FontWeight.w700))),
                         Switch(
                             value: _useInclinometer,
@@ -1124,6 +1308,116 @@ class _AlignmentPageState extends State<AlignmentPage> {
   String _distanceLabel(double meters) => meters >= 1000
       ? '${(meters / 1000).toStringAsFixed(2)} km'
       : '${meters.toStringAsFixed(0)} m';
+}
+
+class _BubbleLevelGauge extends StatelessWidget {
+  const _BubbleLevelGauge({
+    required this.angle,
+    required this.tolerance,
+    required this.label,
+  });
+
+  final double? angle;
+  final double tolerance;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final ready = angle != null && angle!.abs() <= tolerance;
+    final color = angle == null
+        ? const Color(0xFF87919A)
+        : ready
+            ? const Color(0xFF198754)
+            : AppSettings.instance.primaryColor;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Expanded(
+            child: Text(label,
+                style: const TextStyle(fontWeight: FontWeight.w800))),
+        Text(angle == null ? '—°' : '${angle!.toStringAsFixed(1)}°',
+            style: TextStyle(
+                color: color, fontWeight: FontWeight.w900, fontSize: 17)),
+      ]),
+      const SizedBox(height: 5),
+      SizedBox(
+        width: double.infinity,
+        height: 44,
+        child: CustomPaint(
+          painter: _BubbleLevelPainter(angle: angle, color: color),
+        ),
+      ),
+      Text(
+        angle == null
+            ? appText(context, 'Esperando la lectura del inclinómetro…',
+                'Waiting for inclinometer data…')
+            : appText(
+                context,
+                ready ? 'Dentro de tolerancia' : 'Ajusta el nivel',
+                ready ? 'Within tolerance' : 'Adjust the level'),
+        style:
+            TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.w700),
+      ),
+    ]);
+  }
+}
+
+class _BubbleLevelPainter extends CustomPainter {
+  const _BubbleLevelPainter({required this.angle, required this.color});
+
+  final double? angle;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final tube = RRect.fromRectAndRadius(
+      Rect.fromCenter(center: center, width: size.width * .92, height: 25),
+      const Radius.circular(14),
+    );
+    canvas.drawRRect(tube, Paint()..color = const Color(0xFFE9EDF0));
+    canvas.drawRRect(
+      tube,
+      Paint()
+        ..color = const Color(0xFFBFC8D0)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2,
+    );
+    final left = size.width * .08;
+    final right = size.width * .92;
+    for (var mark = -4; mark <= 4; mark++) {
+      final x = center.dx + mark * size.width * .085;
+      final length = mark == 0 ? 14.0 : (mark.abs() == 2 ? 10.0 : 6.0);
+      canvas.drawLine(
+        Offset(x, center.dy - length / 2),
+        Offset(x, center.dy + length / 2),
+        Paint()
+          ..color =
+              mark == 0 ? const Color(0xFF65717B) : const Color(0xFFB0B8BF)
+          ..strokeWidth = mark == 0 ? 1.5 : 1,
+      );
+    }
+    final normalized = angle == null ? 0.0 : (angle! / 12).clamp(-1.0, 1.0);
+    final bubbleCenter = Offset(
+      center.dx + normalized * (right - left) * .44,
+      center.dy,
+    );
+    canvas.drawCircle(
+        bubbleCenter, 8.5, Paint()..color = color.withValues(alpha: .2));
+    canvas.drawCircle(
+      bubbleCenter,
+      6.3,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+    canvas.drawCircle(
+        bubbleCenter, 3, Paint()..color = color.withValues(alpha: .8));
+  }
+
+  @override
+  bool shouldRepaint(covariant _BubbleLevelPainter oldDelegate) =>
+      oldDelegate.angle != angle || oldDelegate.color != color;
 }
 
 class _BearingGuidePainter extends CustomPainter {

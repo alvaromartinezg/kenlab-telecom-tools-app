@@ -16,12 +16,18 @@ class DeviceOrientationReading {
     this.tiltDegrees,
     this.lateralDegrees,
     this.absoluteHeading = false,
+    this.gravityX,
+    this.gravityY,
+    this.gravityZ,
   });
 
   final double? headingDegrees;
   final double? tiltDegrees;
   final double? lateralDegrees;
   final bool absoluteHeading;
+  final double? gravityX;
+  final double? gravityY;
+  final double? gravityZ;
 }
 
 class DeviceOrientationCompass {
@@ -41,21 +47,35 @@ class DeviceOrientationCompass {
       JSNumber? beta,
       JSNumber? gamma,
       JSBoolean absolute,
+      JSNumber? gravityX,
+      JSNumber? gravityY,
+      JSNumber? gravityZ,
     ) {
       if (!_started || _readings.isClosed) return;
       final headingValue = heading?.toDartDouble;
       final betaValue = beta?.toDartDouble;
       final gammaValue = gamma?.toDartDouble;
+      final gravityXValue = gravityX?.toDartDouble;
+      final gravityYValue = gravityY?.toDartDouble;
+      final gravityZValue = gravityZ?.toDartDouble;
       _readings.add(DeviceOrientationReading(
         headingDegrees:
             headingValue != null && headingValue.isFinite ? headingValue : null,
-        // DeviceOrientation beta is 0° with the screen face-up and about 90°
-        // with the phone upright; subtracting 90° gives deviation from vertical.
-        tiltDegrees:
-            betaValue != null && betaValue.isFinite ? betaValue - 90 : null,
+        // beta/gamma remain a fallback; the accelerometer gravity vector is
+        // preferred for the level and tilt measurements.
+        tiltDegrees: betaValue != null && betaValue.isFinite ? betaValue : null,
         lateralDegrees:
             gammaValue != null && gammaValue.isFinite ? gammaValue : null,
         absoluteHeading: absolute.toDart,
+        gravityX: gravityXValue != null && gravityXValue.isFinite
+            ? gravityXValue
+            : null,
+        gravityY: gravityYValue != null && gravityYValue.isFinite
+            ? gravityYValue
+            : null,
+        gravityZ: gravityZValue != null && gravityZValue.isFinite
+            ? gravityZValue
+            : null,
       ));
     }).toJS;
     _startCompass(callback);

@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 
+import '../core/settings/app_settings.dart';
+import '../core/settings/app_text.dart';
 import '../shared/widgets/kenlab_mark.dart';
 import 'home_screen.dart';
 
@@ -8,24 +11,45 @@ class KenLabApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const brandRed = Color(0xFFC62828);
-    return MaterialApp(
-      title: 'KenLab',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: brandRed,
+    final settings = AppSettings.instance;
+    return ListenableBuilder(
+      listenable: settings,
+      builder: (context, _) {
+        final scheme = ColorScheme.fromSeed(
+          seedColor: settings.primaryColor,
           brightness: Brightness.light,
-        ),
-        scaffoldBackgroundColor: const Color(0xFFF5F6F7),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFFF5F6F7),
-          foregroundColor: Color(0xFF17212B),
-          elevation: 0,
-        ),
-      ),
-      home: const _AppEntry(),
+        ).copyWith(secondary: settings.accentColor);
+        return MaterialApp(
+          title: 'KenLab',
+          locale: Locale(settings.languageCode),
+          supportedLocales: const [Locale('es'), Locale('en')],
+          localizationsDelegates: const [
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            useMaterial3: true,
+            colorScheme: scheme,
+            scaffoldBackgroundColor: const Color(0xFFF3F5F7),
+            appBarTheme: const AppBarTheme(
+              backgroundColor: Color(0xFFF3F5F7),
+              foregroundColor: Color(0xFF17212B),
+              elevation: 0,
+            ),
+            cardTheme: CardThemeData(
+              color: Colors.white,
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(18),
+                side: const BorderSide(color: Color(0xFFE5E9ED)),
+              ),
+            ),
+          ),
+          home: const _AppEntry(),
+        );
+      },
     );
   }
 }
@@ -64,28 +88,28 @@ class StartupSplash extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(
+    return Scaffold(
       backgroundColor: Color(0xFFC62828),
       body: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            KenLabMark(
+            const KenLabMark(
                 size: 120, color: Colors.white, accent: Color(0xFFFFD9D9)),
-            SizedBox(height: 18),
+            const SizedBox(height: 18),
             Text(
               'KenLab',
-              style: TextStyle(
+              style: const TextStyle(
                 color: Colors.white,
                 fontSize: 38,
                 fontWeight: FontWeight.w900,
                 letterSpacing: 1.2,
               ),
             ),
-            SizedBox(height: 8),
+            const SizedBox(height: 8),
             Text(
-              'HERRAMIENTAS DE CAMPO',
-              style: TextStyle(
+              appText(context, 'HERRAMIENTAS DE CAMPO', 'FIELD TOOLS'),
+              style: const TextStyle(
                 color: Color(0xFFFFD9D9),
                 fontSize: 11,
                 fontWeight: FontWeight.w700,

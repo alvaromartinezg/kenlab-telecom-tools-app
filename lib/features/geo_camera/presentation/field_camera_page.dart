@@ -6,6 +6,9 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image/image.dart' as img;
 
+import '../../../core/settings/app_settings.dart';
+import '../../../core/settings/app_text.dart';
+
 class FieldCameraPage extends StatefulWidget {
   const FieldCameraPage({super.key});
 
@@ -16,6 +19,8 @@ class FieldCameraPage extends StatefulWidget {
 class _FieldCameraPageState extends State<FieldCameraPage>
     with WidgetsBindingObserver {
   CameraController? _camera;
+  List<CameraDescription> _availableCameras = const [];
+  CameraDescription? _selectedCamera;
   Position? _position;
   Uint8List? _lastPhoto;
   bool _loadingCamera = true;
@@ -44,25 +49,38 @@ class _FieldCameraPageState extends State<FieldCameraPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final camera = _camera;
-    if (camera == null || !camera.value.isInitialized) return;
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused) {
-      camera.dispose();
+      if (camera != null) camera.dispose();
       _camera = null;
     } else if (state == AppLifecycleState.resumed) {
-      _initializeCamera();
+      if (camera == null) _initializeCamera(preferred: _selectedCamera);
     }
   }
 
-  Future<void> _initializeCamera() async {
+  Future<void> _initializeCamera({CameraDescription? preferred}) async {
     try {
       final cameras = await availableCameras();
-      if (cameras.isEmpty)
-        throw CameraException('NoCamera', 'No se encontró una cámara.');
-      final backCamera = cameras
-          .where((camera) => camera.lensDirection == CameraLensDirection.back);
+      if (cameras.isEmpty) {
+        throw CameraException(
+            'NoCamera', appText(context, 'No hay cámaras disponibles.'));
+      }
+      final selected = preferred ??
+          (cameras.any((camera) => camera.name == _selectedCamera?.name)
+              ? cameras
+                  .firstWhere((camera) => camera.name == _selectedCamera?.name)
+              : cameras.firstWhere(
+                  (camera) => camera.lensDirection == CameraLensDirection.back,
+                  orElse: () => cameras.first,
+                ));
+      if (mounted) {
+        setState(() {
+          _availableCameras = cameras;
+          _selectedCamera = selected;
+        });
+      }
       final controller = CameraController(
-        backCamera.isNotEmpty ? backCamera.first : cameras.first,
+        selected,
         ResolutionPreset.high,
         enableAudio: false,
       );
@@ -71,11 +89,15 @@ class _FieldCameraPageState extends State<FieldCameraPage>
         await controller.dispose();
         return;
       }
+      final previous = _camera;
       setState(() {
         _camera = controller;
         _cameraError = null;
         _loadingCamera = false;
       });
+      if (previous != null && !identical(previous, controller)) {
+        await previous.dispose();
+      }
     } on CameraException catch (error) {
       if (!mounted) return;
       setState(() {
@@ -89,6 +111,35 @@ class _FieldCameraPageState extends State<FieldCameraPage>
         _loadingCamera = false;
       });
     }
+  }
+
+  Future<void> _selectCamera(int index) async {
+    if (index < 0 || index >= _availableCameras.length) return;
+    final selected = _availableCameras[index];
+    if (_selectedCamera?.name == selected.name) return;
+    final previous = _camera;
+    setState(() {
+      _camera = null;
+      _selectedCamera = selected;
+      _loadingCamera = true;
+      _cameraError = null;
+    });
+    await previous?.dispose();
+    if (mounted) await _initializeCamera(preferred: selected);
+  }
+
+  String _cameraLabel(CameraDescription camera, int index) {
+    final lens = switch (camera.lensDirection) {
+      CameraLensDirection.front => appText(context, 'frontal'),
+      CameraLensDirection.back => appText(context, 'trasera'),
+      CameraLensDirection.external => appText(context, 'externa', 'external'),
+    };
+    final name = camera.name.trim();
+    final looksLikeDeviceId =
+        RegExp(r'^[0-9a-f-]{12,}$', caseSensitive: false).hasMatch(name);
+    return name.isEmpty || looksLikeDeviceId
+        ? '${appText(context, 'Cámara')} ${index + 1} · $lens'
+        : '$lens · $name';
   }
 
   Future<void> _refreshLocation() async {
@@ -142,9 +193,13 @@ class _FieldCameraPageState extends State<FieldCameraPage>
           _lastPhoto = bytes;
           _capturedAt = now;
         });
-      if (mounted) _showMessage('Foto KenLab guardada con los datos visibles.');
+      if (mounted)
+        _showMessage(appText(context, 'Foto guardada con los datos visibles.'));
     } catch (error) {
-      if (mounted) _showMessage('No se pudo tomar la foto: $error');
+      if (mounted) {
+        _showMessage(
+            '${appText(context, 'No se pudo tomar la foto', 'Could not take the photo')}: $error');
+      }
     } finally {
       if (mounted) setState(() => _capturing = false);
     }
@@ -155,12 +210,17 @@ class _FieldCameraPageState extends State<FieldCameraPage>
     final photo = img.decodeImage(bytes);
     if (photo == null) return bytes;
     final metadata = <String>[
-      'KENLAB FIELD PHOTO',
+      if (AppSettings.instance.companyName.trim().isNotEmpty)
+        AppSettings.instance.companyName.trim(),
       '${timestamp.year}-${timestamp.month.toString().padLeft(2, '0')}-${timestamp.day.toString().padLeft(2, '0')} ${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}',
       if (position != null)
-        'GPS ${position.latitude.toStringAsFixed(6)}, ${position.longitude.toStringAsFixed(6)}',
+        '${position.latitude.toStringAsFixed(6)}, ${position.longitude.toStringAsFixed(6)}',
       if (position != null)
-        'ALT ${position.altitude.toStringAsFixed(1)} m  ACC +/-${position.accuracy.toStringAsFixed(0)} m',
+        appText(
+          context,
+          'Altitud ${position.altitude.toStringAsFixed(1)} m  ·  Precisión ±${position.accuracy.toStringAsFixed(0)} m',
+          'Altitude ${position.altitude.toStringAsFixed(1)} m  ·  Accuracy ±${position.accuracy.toStringAsFixed(0)} m',
+        ),
       if (note.isNotEmpty) note,
     ];
     final font = img.arial24;
@@ -187,9 +247,15 @@ class _FieldCameraPageState extends State<FieldCameraPage>
   String _cameraMessage(CameraException error) {
     if (error.code == 'CameraAccessDenied' ||
         error.code == 'cameraPermission') {
-      return 'Permite el acceso a la cámara en los ajustes del navegador o dispositivo.';
+      return appText(
+        context,
+        'Permite el acceso a la cámara en los ajustes del navegador o dispositivo.',
+        'Allow camera access in your browser or device settings.',
+      );
     }
-    return error.description ?? 'No se pudo iniciar la cámara.';
+    return error.description ??
+        appText(context, 'No se pudo iniciar la cámara.',
+            'Could not start the camera.');
   }
 
   void _showMessage(String message) {
@@ -205,11 +271,38 @@ class _FieldCameraPageState extends State<FieldCameraPage>
       appBar: AppBar(
         backgroundColor: const Color(0xFF17212B),
         foregroundColor: Colors.white,
-        title: const Text('Cámara de campo'),
+        title: Text(appText(context, 'Cámara de campo')),
         actions: [
+          PopupMenuButton<int>(
+            tooltip: appText(context, 'Cambiar cámara'),
+            enabled: !_loadingCamera && _availableCameras.length > 1,
+            icon: const Icon(Icons.cameraswitch_outlined),
+            onSelected: _selectCamera,
+            itemBuilder: (context) => [
+              for (var index = 0; index < _availableCameras.length; index++)
+                PopupMenuItem(
+                  value: index,
+                  child: Row(children: [
+                    Icon(_availableCameras[index].lensDirection ==
+                            CameraLensDirection.front
+                        ? Icons.camera_front_outlined
+                        : Icons.camera_rear_outlined),
+                    const SizedBox(width: 10),
+                    Flexible(
+                        child: Text(
+                            _cameraLabel(_availableCameras[index], index))),
+                    if (_selectedCamera?.name ==
+                        _availableCameras[index].name) ...[
+                      const SizedBox(width: 8),
+                      const Icon(Icons.check, size: 18),
+                    ],
+                  ]),
+                ),
+            ],
+          ),
           IconButton(
               onPressed: _refreshLocation,
-              tooltip: 'Actualizar GPS',
+              tooltip: appText(context, 'Actualizar ubicación'),
               icon: const Icon(Icons.my_location)),
         ],
       ),
@@ -227,6 +320,7 @@ class _FieldCameraPageState extends State<FieldCameraPage>
                   timestamp: _capturedAt ?? DateTime.now(),
                   note: _noteController.text,
                   locationError: _locationError,
+                  companyName: AppSettings.instance.companyName,
                 ),
               ),
               if (_lastPhoto != null)
@@ -249,7 +343,7 @@ class _FieldCameraPageState extends State<FieldCameraPage>
                 controller: _noteController,
                 style: const TextStyle(color: Colors.white),
                 decoration: InputDecoration(
-                  hintText: 'Descripción opcional de la foto',
+                  hintText: appText(context, 'Descripción opcional de la foto'),
                   hintStyle: const TextStyle(color: Colors.white60),
                   prefixIcon:
                       const Icon(Icons.edit_note, color: Colors.white70),
@@ -261,16 +355,45 @@ class _FieldCameraPageState extends State<FieldCameraPage>
                 ),
                 onChanged: (_) => setState(() {}),
               ),
+              if (AppSettings.instance.quickNotes.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 36,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: AppSettings.instance.quickNotes.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 8),
+                    itemBuilder: (context, index) {
+                      final note = AppSettings.instance.quickNotes[index];
+                      return ActionChip(
+                        label: Text(note,
+                            maxLines: 1, overflow: TextOverflow.ellipsis),
+                        onPressed: () {
+                          setState(() {
+                            _noteController.text = note;
+                            _noteController.selection =
+                                TextSelection.collapsed(offset: note.length);
+                          });
+                        },
+                      );
+                    },
+                  ),
+                ),
+              ],
               const SizedBox(height: 12),
               Row(children: [
-                const Expanded(
+                Expanded(
                   child: Text(
-                      'La foto se descarga con fecha, GPS, altitud y descripción incrustados.',
-                      style: TextStyle(color: Colors.white70, fontSize: 12)),
+                      appText(
+                          context,
+                          'La foto se guarda con fecha, coordenadas, altitud y descripción.',
+                          'The photo is saved with date, coordinates, altitude and note.'),
+                      style:
+                          const TextStyle(color: Colors.white70, fontSize: 12)),
                 ),
                 const SizedBox(width: 16),
                 Semantics(
-                  label: 'Tomar foto',
+                  label: appText(context, 'Tomar foto'),
                   child: GestureDetector(
                     onTap: _takePhoto,
                     child: Container(
@@ -281,7 +404,7 @@ class _FieldCameraPageState extends State<FieldCameraPage>
                         border: Border.all(color: Colors.white, width: 4),
                         color: _capturing
                             ? Colors.white38
-                            : const Color(0xFFC62828),
+                            : AppSettings.instance.primaryColor,
                       ),
                       child: _capturing
                           ? const Padding(
@@ -325,7 +448,7 @@ class _FieldCameraPageState extends State<FieldCameraPage>
                 _initializeCamera();
               },
               icon: const Icon(Icons.refresh),
-              label: const Text('Intentar de nuevo'),
+              label: Text(appText(context, 'Intentar de nuevo', 'Try again')),
             ),
           ]),
         ),
@@ -348,12 +471,14 @@ class _MetadataOverlay extends StatelessWidget {
       {required this.position,
       required this.timestamp,
       required this.note,
-      required this.locationError});
+      required this.locationError,
+      required this.companyName});
 
   final Position? position;
   final DateTime timestamp;
   final String note;
   final String? locationError;
+  final String companyName;
 
   @override
   Widget build(BuildContext context) {
@@ -373,18 +498,21 @@ class _MetadataOverlay extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text('KENLAB  •  EVIDENCIA DE CAMPO',
-                  style: TextStyle(
-                      fontWeight: FontWeight.w800, letterSpacing: .6)),
+              if (companyName.trim().isNotEmpty)
+                Text(companyName.trim(),
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w800, letterSpacing: .4)),
               Text(
                   '${timestamp.year}-${timestamp.month.toString().padLeft(2, '0')}-${timestamp.day.toString().padLeft(2, '0')}  ${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}'),
               if (p != null) ...[
                 Text(
-                    'GPS  ${p.latitude.toStringAsFixed(6)}, ${p.longitude.toStringAsFixed(6)}'),
+                    '${p.latitude.toStringAsFixed(6)}, ${p.longitude.toStringAsFixed(6)}'),
                 Text(
-                    'Altitud  ${p.altitude.toStringAsFixed(1)} m  •  Precisión  ±${p.accuracy.toStringAsFixed(0)} m'),
+                    '${appText(context, 'Altitud', 'Altitude')}  ${p.altitude.toStringAsFixed(1)} m  •  ${appText(context, 'Precisión', 'Accuracy')}  ±${p.accuracy.toStringAsFixed(0)} m'),
               ] else
-                Text(locationError ?? 'Obteniendo coordenadas GPS…'),
+                Text(locationError ??
+                    appText(context, 'Obteniendo coordenadas…',
+                        'Getting coordinates…')),
               if (note.trim().isNotEmpty)
                 Text(note.trim(), maxLines: 2, overflow: TextOverflow.ellipsis),
             ]),

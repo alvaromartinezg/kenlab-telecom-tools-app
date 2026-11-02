@@ -6,12 +6,18 @@ class DeviceOrientationReading {
     this.tiltDegrees,
     this.lateralDegrees,
     this.absoluteHeading = false,
+    this.gravityX,
+    this.gravityY,
+    this.gravityZ,
   });
 
   final double? headingDegrees;
   final double? tiltDegrees;
   final double? lateralDegrees;
   final bool absoluteHeading;
+  final double? gravityX;
+  final double? gravityY;
+  final double? gravityZ;
 }
 
 class DeviceOrientationCompass {
