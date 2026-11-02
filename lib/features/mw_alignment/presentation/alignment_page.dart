@@ -1,13 +1,18 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
+import 'package:file_saver/file_saver.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
 import '../../../core/location/elevation_service.dart';
+import '../data/device_orientation_compass.dart';
 import '../../mw_profile/data/mw_profile_api.dart';
 import '../../mw_profile/models/link_profile.dart';
 import '../../mw_profile/presentation/link_profile_chart.dart';
@@ -32,6 +37,11 @@ class _AlignmentPageState extends State<AlignmentPage> {
   AccelerometerEvent? _acceleration;
   MagnetometerEvent? _magneticField;
   double? _heading;
+  double? _webTilt;
+  double? _webLateral;
+  bool _requestingCompass = false;
+  bool _compassPermissionGranted = false;
+  String? _compassError;
   bool _loadingCamera = true;
   bool _useInclinometer = true;
   bool _connectionMode = false;
@@ -46,8 +56,11 @@ class _AlignmentPageState extends State<AlignmentPage> {
   String? _profileError;
   int _profileRequestNumber = 0;
   _GuidedStep? _guidedStep;
+  final _guidedCaptureKey = GlobalKey();
+  final _orientationCompass = DeviceOrientationCompass();
   StreamSubscription<AccelerometerEvent>? _accSubscription;
   StreamSubscription<MagnetometerEvent>? _magSubscription;
+  StreamSubscription<DeviceOrientationReading>? _orientationSubscription;
 
   final _siteBLat = TextEditingController();
   final _siteBLon = TextEditingController();
@@ -68,6 +81,8 @@ class _AlignmentPageState extends State<AlignmentPage> {
     _camera?.dispose();
     _accSubscription?.cancel();
     _magSubscription?.cancel();
+    _orientationSubscription?.cancel();
+    _orientationCompass.stop();
     _siteBLat.dispose();
     _siteBLon.dispose();
     _elevationDebounce?.cancel();
@@ -142,6 +157,9 @@ class _AlignmentPageState extends State<AlignmentPage> {
   }
 
   void _listenToSensors() {
+    // Generic Sensor's Magnetometer API is unavailable in mobile browsers.
+    // The web implementation starts DeviceOrientation after a user grants it.
+    if (kIsWeb) return;
     _accSubscription = accelerometerEventStream().listen((event) {
       _acceleration = event;
       _updateHeading();
@@ -157,6 +175,10 @@ class _AlignmentPageState extends State<AlignmentPage> {
     final acceleration = _acceleration;
     final magnetic = _magneticField;
     if (acceleration == null || magnetic == null) return;
+    final magneticStrength = math.sqrt(magnetic.x * magnetic.x +
+        magnetic.y * magnetic.y +
+        magnetic.z * magnetic.z);
+    if (magneticStrength < 1) return;
     final roll = math.atan2(acceleration.y, acceleration.z);
     final pitch = math.atan2(
       -acceleration.x,
@@ -171,6 +193,55 @@ class _AlignmentPageState extends State<AlignmentPage> {
     final degrees =
         (math.atan2(horizontalY, horizontalX) * 180 / math.pi + 360) % 360;
     if (mounted) setState(() => _heading = degrees);
+  }
+
+  Future<void> _enableCompass() async {
+    if (_requestingCompass) return;
+    setState(() {
+      _requestingCompass = true;
+      _compassError = null;
+    });
+    try {
+      final granted = await _orientationCompass.requestPermission();
+      if (!mounted) return;
+      if (!granted) {
+        setState(() {
+          _requestingCompass = false;
+          _compassPermissionGranted = false;
+          _compassError =
+              'No se autorizó la orientación. Permítela en Safari y vuelve a intentarlo.';
+        });
+        return;
+      }
+      await _orientationSubscription?.cancel();
+      _orientationSubscription = _orientationCompass.start().listen(
+        (reading) {
+          if (!mounted) return;
+          setState(() {
+            if (reading.headingDegrees != null) {
+              _heading = reading.headingDegrees;
+            }
+            _webTilt = reading.tiltDegrees;
+            _webLateral = reading.lateralDegrees;
+          });
+        },
+        onError: (Object error) {
+          if (mounted)
+            setState(() => _compassError = 'Sensor de orientación: $error');
+        },
+      );
+      setState(() {
+        _requestingCompass = false;
+        _compassPermissionGranted = true;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _requestingCompass = false;
+        _compassPermissionGranted = false;
+        _compassError = 'No se pudo habilitar la brújula: $error';
+      });
+    }
   }
 
   LinkGeometry? get _geometry {
@@ -222,6 +293,7 @@ class _AlignmentPageState extends State<AlignmentPage> {
   }
 
   double? get _lateralAngle {
+    if (_webLateral != null) return _webLateral;
     final acceleration = _acceleration;
     if (acceleration == null) return null;
     // Use the gravity axis appropriate to the instructed phone orientation:
@@ -390,8 +462,10 @@ class _AlignmentPageState extends State<AlignmentPage> {
       _azimuthError != null && _azimuthError!.abs() <= _azimuthTolerance;
   bool get _fineAligned => _lateralReady && _tiltReady && _azimuthReady;
 
-  void _startGuidedAlignment() =>
-      setState(() => _guidedStep = _GuidedStep.lateral);
+  void _startGuidedAlignment() {
+    if (kIsWeb && !_compassPermissionGranted) unawaited(_enableCompass());
+    setState(() => _guidedStep = _GuidedStep.lateral);
+  }
 
   void _advanceGuidedAlignment() {
     final step = _guidedStep;
@@ -403,6 +477,109 @@ class _AlignmentPageState extends State<AlignmentPage> {
       setState(() => _guidedStep = _GuidedStep.fine);
     }
   }
+
+  Future<void> _captureGuidedStep() async {
+    final step = _guidedStep;
+    if (step == null) return;
+    if (step != _GuidedStep.fine && !_stepReady(step)) {
+      _showMessage('Ajusta los valores dentro de tolerancia antes de avanzar.');
+      return;
+    }
+    final renderObject = _guidedCaptureKey.currentContext?.findRenderObject();
+    if (renderObject is! RenderRepaintBoundary) {
+      _showMessage('No se pudo capturar esta pantalla. Inténtalo de nuevo.');
+      return;
+    }
+    ui.Image? image;
+    try {
+      image = await renderObject.toImage(pixelRatio: 2);
+      final data = await image.toByteData(format: ui.ImageByteFormat.png);
+      if (data == null) throw Exception('No se pudo codificar la captura PNG.');
+      final now = DateTime.now();
+      final bytes = data.buffer.asUint8List(
+        data.offsetInBytes,
+        data.lengthInBytes,
+      );
+      await FileSaver.instance.saveFile(
+        name:
+            'KenLab_${step.name}_${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}${now.second.toString().padLeft(2, '0')}',
+        bytes: bytes,
+        fileExtension: 'png',
+        mimeType: MimeType.png,
+      );
+      if (!mounted) return;
+      if (step != _GuidedStep.fine) _advanceGuidedAlignment();
+      _showMessage(step == _GuidedStep.fine
+          ? 'Captura de pantalla guardada.'
+          : 'Captura guardada; avanzaste al siguiente paso.');
+    } catch (error) {
+      if (mounted) _showMessage('No se pudo guardar la captura: $error');
+    } finally {
+      image?.dispose();
+    }
+  }
+
+  bool _stepReady(_GuidedStep step) => switch (step) {
+        _GuidedStep.lateral => _lateralReady,
+        _GuidedStep.tilt => _tiltReady,
+        _GuidedStep.azimuth => _azimuthReady,
+        _GuidedStep.fine => _fineAligned,
+      };
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Widget _azimuthReadout({bool dark = false}) {
+    final primary = dark ? Colors.white : const Color(0xFF263746);
+    final secondary = dark ? Colors.white70 : const Color(0xFF66736B);
+    final errorColor = _azimuthReady
+        ? const Color(0xFF198754)
+        : (dark ? const Color(0xFFFF8A80) : const Color(0xFFC62828));
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: dark
+            ? Colors.black.withValues(alpha: .24)
+            : const Color(0xFFF4F5F6),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(children: [
+        _azimuthValue('BRÚJULA', _heading, primary, secondary),
+        _azimuthValue('OBJETIVO', _targetAzimuth, primary, secondary),
+        _azimuthValue('DIFERENCIA', _azimuthError, errorColor, secondary,
+            signed: true),
+      ]),
+    );
+  }
+
+  Widget _azimuthValue(
+    String label,
+    double? value,
+    Color primary,
+    Color secondary, {
+    bool signed = false,
+  }) =>
+      Expanded(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(label,
+              style: TextStyle(
+                  color: secondary,
+                  fontSize: 9,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: .4)),
+          const SizedBox(height: 2),
+          Text(
+            value == null
+                ? '—°'
+                : '${signed && value > 0 ? '+' : ''}${value.toStringAsFixed(1)}°',
+            style: TextStyle(
+                color: primary, fontSize: 18, fontWeight: FontWeight.w900),
+          ),
+        ]),
+      );
 
   Widget _guidedAlignmentCard() {
     final step = _guidedStep;
@@ -464,73 +641,113 @@ class _AlignmentPageState extends State<AlignmentPage> {
         ? const Color(0xFF198754)
         : const Color(0xFFC62828);
 
-    return Card(
-      margin: EdgeInsets.zero,
-      color: background,
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Icon(
-                step == _GuidedStep.fine
-                    ? Icons.center_focus_strong
-                    : Icons.screen_rotation_alt,
-                color: accent),
-            const SizedBox(width: 8),
-            Expanded(
-                child: Text(title,
-                    style:
-                        TextStyle(fontWeight: FontWeight.w800, color: accent))),
-            if (step != _GuidedStep.fine)
-              IconButton(
-                  onPressed: () => setState(() => _guidedStep = null),
-                  tooltip: 'Salir de guía',
-                  icon: const Icon(Icons.close)),
-          ]),
-          Text(instruction, style: const TextStyle(fontSize: 12, height: 1.35)),
-          if (step == _GuidedStep.fine) ...[
-            const SizedBox(height: 10),
-            _fineMetric(
-                'Lateral', _lateralAngle, _lateralTolerance, _lateralReady),
-            _fineMetric(
-                'Tilt',
-                _pitch == null || _tilt == null ? null : _pitch! - _tilt!,
-                _tiltTolerance,
-                _tiltReady),
-            _fineMetric(
-                'Azimut', _azimuthError, _azimuthTolerance, _azimuthReady),
-            const SizedBox(height: 6),
-            Text(
-                _fineAligned
-                    ? 'LISTO PARA COMPROBACIÓN DEL RADIO'
-                    : 'AJUSTE PENDIENTE',
-                style: TextStyle(
-                    fontWeight: FontWeight.w900,
-                    color: accent,
-                    letterSpacing: .5)),
-          ] else ...[
-            const SizedBox(height: 10),
-            Text(
-              measured == null || target == null
-                  ? 'Esperando sensor o valores objetivo…'
-                  : 'Medido ${measured.toStringAsFixed(1)}°  ·  Objetivo ${target.toStringAsFixed(1)}°  ·  Error ${difference!.abs().toStringAsFixed(1)}° (±${tolerance.toStringAsFixed(1)}°)',
-              style: const TextStyle(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerRight,
-              child: FilledButton(
-                onPressed: ready ? _advanceGuidedAlignment : null,
-                child: Text(step == _GuidedStep.azimuth
-                    ? 'Ir a alineamiento fino'
-                    : 'Continuar'),
+    return RepaintBoundary(
+      key: _guidedCaptureKey,
+      child: Card(
+        margin: EdgeInsets.zero,
+        color: background,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Icon(
+                  step == _GuidedStep.fine
+                      ? Icons.center_focus_strong
+                      : Icons.screen_rotation_alt,
+                  color: accent),
+              const SizedBox(width: 8),
+              Expanded(
+                  child: Text(title,
+                      style: TextStyle(
+                          fontWeight: FontWeight.w800, color: accent))),
+              if (step != _GuidedStep.fine)
+                IconButton(
+                    onPressed: () => setState(() => _guidedStep = null),
+                    tooltip: 'Salir de guía',
+                    icon: const Icon(Icons.close)),
+            ]),
+            Text(instruction,
+                style: const TextStyle(fontSize: 12, height: 1.35)),
+            if (step == _GuidedStep.azimuth && kIsWeb) ...[
+              const SizedBox(height: 10),
+              FilledButton.icon(
+                onPressed: _requestingCompass ? null : _enableCompass,
+                icon: Icon(_compassPermissionGranted
+                    ? Icons.explore
+                    : Icons.explore_outlined),
+                label: Text(_requestingCompass
+                    ? 'Solicitando acceso…'
+                    : _compassPermissionGranted
+                        ? 'Volver a activar brújula'
+                        : 'Permitir acceso a la brújula'),
               ),
-            ),
-          ],
-          const Text(
-              'Tolerancias beta: lateral ±1.5°, tilt ±1°, azimut ±2°. La brújula puede desviarse por metal y no sustituye la lectura del radio.',
-              style: TextStyle(fontSize: 10, color: Color(0xFF66736B))),
-        ]),
+              if (_compassError != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 5),
+                  child: Text(_compassError!,
+                      style: const TextStyle(
+                          color: Color(0xFF9B2C2C), fontSize: 11)),
+                ),
+            ],
+            if (step == _GuidedStep.azimuth || step == _GuidedStep.fine) ...[
+              const SizedBox(height: 10),
+              _azimuthReadout(),
+            ],
+            if (step == _GuidedStep.fine) ...[
+              const SizedBox(height: 10),
+              _fineMetric(
+                  'Lateral', _lateralAngle, _lateralTolerance, _lateralReady),
+              _fineMetric(
+                  'Tilt',
+                  _pitch == null || _tilt == null ? null : _pitch! - _tilt!,
+                  _tiltTolerance,
+                  _tiltReady),
+              _fineMetric(
+                  'Azimut', _azimuthError, _azimuthTolerance, _azimuthReady),
+              const SizedBox(height: 6),
+              Text(
+                  _fineAligned
+                      ? 'LISTO PARA COMPROBACIÓN DEL RADIO'
+                      : 'AJUSTE PENDIENTE',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w900,
+                      color: accent,
+                      letterSpacing: .5)),
+            ] else ...[
+              const SizedBox(height: 10),
+              Text(
+                measured == null || target == null
+                    ? 'Esperando sensor o valores objetivo…'
+                    : 'Medido ${measured.toStringAsFixed(1)}°  ·  Objetivo ${target.toStringAsFixed(1)}°  ·  Error ${difference!.abs().toStringAsFixed(1)}° (±${tolerance.toStringAsFixed(1)}°)',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: ready ? _captureGuidedStep : null,
+                  icon: const Icon(Icons.screenshot_outlined),
+                  label: const Text('Capturar pantalla y continuar'),
+                ),
+              ),
+            ],
+            if (step == _GuidedStep.fine) ...[
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _captureGuidedStep,
+                  icon: const Icon(Icons.screenshot_outlined),
+                  label: const Text('Guardar captura de pantalla'),
+                ),
+              ),
+            ],
+            const Text(
+                'Tolerancias beta: lateral ±1.5°, tilt ±1°, azimut ±2°. La brújula puede desviarse por metal y no sustituye la lectura del radio.',
+                style: TextStyle(fontSize: 10, color: Color(0xFF66736B))),
+          ]),
+        ),
       ),
     );
   }
@@ -551,6 +768,7 @@ class _AlignmentPageState extends State<AlignmentPage> {
       );
 
   double? get _pitch {
+    if (_webTilt != null) return _webTilt;
     final acceleration = _acceleration;
     if (acceleration == null) return null;
     final verticalGravity = acceleration.y;
@@ -612,7 +830,7 @@ class _AlignmentPageState extends State<AlignmentPage> {
                           style: const TextStyle(color: Colors.white),
                           textAlign: TextAlign.center),
                 ),
-              if (geometry != null)
+              if (geometry != null && _heading != null)
                 Positioned.fill(
                   child: IgnorePointer(
                     child: CustomPaint(
@@ -645,16 +863,44 @@ class _AlignmentPageState extends State<AlignmentPage> {
                                 ? (_siteA == null
                                     ? 'Obteniendo ubicación de Site A…'
                                     : 'Ingresa las coordenadas de Site B')
-                                : 'AZIMUT OBJETIVO  ${targetAzimuth!.toStringAsFixed(1)}°',
+                                : 'AZIMUT OBJETIVO',
                             style: const TextStyle(
                                 color: Colors.white,
+                                fontSize: 11,
                                 fontWeight: FontWeight.w800,
                                 letterSpacing: .5)),
                         if (geometry != null)
-                          Text(
-                              'Distancia ${_distanceLabel(targetDistance!)}${_heading == null ? '  •  rumbo de brújula no disponible' : '  •  brújula ${_heading!.toStringAsFixed(0)}°'}',
+                          Text('${targetAzimuth!.toStringAsFixed(1)}°',
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 25,
+                                  fontWeight: FontWeight.w900)),
+                        if (geometry != null)
+                          Text('Distancia ${_distanceLabel(targetDistance!)}',
                               style: const TextStyle(
                                   color: Colors.white70, fontSize: 12)),
+                        if (geometry != null) ...[
+                          const SizedBox(height: 8),
+                          _azimuthReadout(dark: true),
+                          if (kIsWeb && !_compassPermissionGranted)
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: TextButton.icon(
+                                onPressed:
+                                    _requestingCompass ? null : _enableCompass,
+                                style: TextButton.styleFrom(
+                                    foregroundColor: Colors.white),
+                                icon: const Icon(Icons.explore_outlined),
+                                label: Text(_requestingCompass
+                                    ? 'Solicitando acceso…'
+                                    : 'Permitir acceso a la brújula'),
+                              ),
+                            ),
+                        ],
+                        if (kIsWeb && _compassError != null)
+                          Text(_compassError!,
+                              style: const TextStyle(
+                                  color: Colors.orangeAccent, fontSize: 11)),
                         if (_error != null)
                           Text(_error!,
                               style: const TextStyle(
