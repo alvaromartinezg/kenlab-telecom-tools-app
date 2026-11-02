@@ -10,39 +10,9 @@
   <link rel="manifest" href="manifest.json">
   <style>
     html, body { width: 100%; height: 100%; margin: 0; background: #C62828; }
-    #kenlab-loader {
-      position: fixed; inset: 0; z-index: 9999; display: grid; place-content: center;
-      justify-items: center; gap: 16px; background: #C62828; color: white;
-      font: 900 36px system-ui, sans-serif; letter-spacing: 1px;
-      transition: opacity 240ms ease;
-    }
-    #kenlab-loader small { color: #FFD9D9; font: 700 11px system-ui, sans-serif; letter-spacing: 2.2px; }
-    #kenlab-loader svg { width: 112px; height: 112px; }
-    #kenlab-loader.hidden { opacity: 0; pointer-events: none; }
   </style>
 </head>
 <body>
-  <div id="kenlab-loader" aria-label="Cargando KenLab">
-    <svg viewBox="0 0 100 100" role="img" aria-label="Símbolo KenLab K y antena">
-      <g fill="none" stroke="white" stroke-linecap="round" stroke-linejoin="round" stroke-width="8">
-        <path d="M25 25v55M25 55 68 24M25 55l43 26M42 72 68 24l19 56M51 55h29"/>
-        <path d="M15 34h20M14 71h21" stroke="#FFD9D9" stroke-width="4"/>
-        <path d="M17 19c5-5 11-7 17-7M12 13c7-7 15-10 24-10" stroke="#FFD9D9" stroke-width="3"/>
-      </g>
-      <circle cx="25" cy="17" r="4" fill="#FFD9D9"/>
-    </svg>
-    <span>KenLab</span>
-    <small>HERRAMIENTAS DE CAMPO</small>
-  </div>
   <script src="flutter_bootstrap.js" async></script>
-  <script>
-    window.addEventListener('flutter-first-frame', function () {
-      const loader = document.getElementById('kenlab-loader');
-      if (loader) {
-        loader.classList.add('hidden');
-        window.setTimeout(() => loader.remove(), 260);
-      }
-    });
-  </script>
 </body>
 </html>

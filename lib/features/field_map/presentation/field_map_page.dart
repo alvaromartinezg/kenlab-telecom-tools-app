@@ -32,8 +32,14 @@ class _FieldMapPageState extends State<FieldMapPage> {
   final List<_RoutePhoto> _photos = [];
   final List<ml.Symbol> _photoSymbols = [];
   bool _recording = false;
+  bool _navigatingRoute = false;
+  bool _is3d = true;
   bool _downloadingOffline = false;
   double? _offlineProgress;
+  int _nextRouteIndex = 0;
+  double? _offRouteMeters;
+  double? _nextPointMeters;
+  double? _nextPointBearing;
   String? _mapError;
   String _routeName = 'Ruta de campo';
   final _routeNameController = TextEditingController(text: 'Ruta de campo');
@@ -83,15 +89,18 @@ class _FieldMapPageState extends State<FieldMapPage> {
 
   void _onMapCreated(ml.MapLibreMapController controller) {
     _map = controller;
+    _moveCamera(_mapCenter);
+    _redrawRoute();
   }
 
   void _moveCamera(ml.LatLng center) {
     _map?.animateCamera(ml.CameraUpdate.newCameraPosition(
-      ml.CameraPosition(target: center, zoom: 15.5, tilt: 55),
+      ml.CameraPosition(target: center, zoom: 15.5, tilt: _is3d ? 55 : 0),
     ));
   }
 
   Future<void> _startRecording() async {
+    if (_navigatingRoute) await _stopRouteGuidance();
     try {
       final position = await _requestPosition();
       final first = _routePoint(position);
@@ -102,6 +111,7 @@ class _FieldMapPageState extends State<FieldMapPage> {
         _photos.clear();
         _latestPosition = position;
         _recording = true;
+        _navigatingRoute = false;
         _mapError = null;
       });
       await _redrawRoute();
@@ -152,6 +162,87 @@ class _FieldMapPageState extends State<FieldMapPage> {
       _message('Ruta detenida. Ya puedes compartirla en KMZ.');
   }
 
+  Future<void> _startRouteGuidance() async {
+    if (_route.length < 2 || _recording) return;
+    try {
+      final position = await _requestPosition();
+      setState(() {
+        _navigatingRoute = true;
+        _nextRouteIndex = 0;
+        _mapError = null;
+      });
+      _onNavigationPosition(position);
+      _routeSubscription = Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.bestForNavigation,
+          distanceFilter: 3,
+        ),
+      ).listen(_onNavigationPosition, onError: (Object error) {
+        if (mounted) setState(() => _mapError = 'GPS de navegación: $error');
+      });
+    } catch (error) {
+      _message(error.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  Future<void> _stopRouteGuidance() async {
+    await _routeSubscription?.cancel();
+    _routeSubscription = null;
+    if (mounted) setState(() => _navigatingRoute = false);
+  }
+
+  void _onNavigationPosition(Position position) {
+    if (_route.isEmpty) return;
+    _latestPosition = position;
+    var nearestIndex = _nextRouteIndex.clamp(0, _route.length - 1);
+    var nearestDistance = double.infinity;
+    for (var index = nearestIndex; index < _route.length; index++) {
+      final point = _route[index];
+      final distance = Geolocator.distanceBetween(
+        position.latitude,
+        position.longitude,
+        point.latitude,
+        point.longitude,
+      );
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    }
+    var deviation = double.infinity;
+    for (final point in _route) {
+      final distance = Geolocator.distanceBetween(position.latitude,
+          position.longitude, point.latitude, point.longitude);
+      if (distance < deviation) deviation = distance;
+    }
+    final nextIndex =
+        nearestIndex + 1 < _route.length ? nearestIndex + 1 : _route.length - 1;
+    final next = _route[nextIndex];
+    final metersToNext = Geolocator.distanceBetween(
+      position.latitude,
+      position.longitude,
+      next.latitude,
+      next.longitude,
+    );
+    final bearing = Geolocator.bearingBetween(
+      position.latitude,
+      position.longitude,
+      next.latitude,
+      next.longitude,
+    );
+    setState(() {
+      _nextRouteIndex = nearestIndex;
+      _offRouteMeters = deviation;
+      _nextPointMeters = metersToNext;
+      _nextPointBearing = bearing;
+    });
+    _moveCamera(ml.LatLng(position.latitude, position.longitude));
+    if (nearestIndex == _route.length - 1 && metersToNext < 8) {
+      _stopRouteGuidance();
+      _message('Llegaste al final de la ruta.');
+    }
+  }
+
   Future<void> _redrawRoute() async {
     final controller = _map;
     if (controller == null || _route.length < 2) return;
@@ -177,18 +268,19 @@ class _FieldMapPageState extends State<FieldMapPage> {
           'Inicia la grabación y espera a obtener GPS para agregar una foto.');
       return;
     }
-    final bytes = await showDialog<Uint8List>(
+    final captured = await showDialog<_CapturedRoutePhoto>(
       context: context,
       builder: (_) => const _RoutePhotoDialog(),
     );
-    if (bytes == null || !mounted) return;
-    final compressed = _compressPhoto(bytes);
+    if (captured == null || !mounted) return;
+    final compressed = _compressPhoto(captured.bytes);
     final photo = _RoutePhoto(
       latitude: position.latitude,
       longitude: position.longitude,
       altitude: position.altitude,
       capturedAt: DateTime.now(),
       bytes: compressed,
+      comment: captured.comment,
     );
     setState(() => _photos.add(photo));
     final symbol = await _map?.addSymbol(ml.SymbolOptions(
@@ -313,8 +405,9 @@ class _FieldMapPageState extends State<FieldMapPage> {
       final photo = _photos[index];
       final imagePath = 'photos/reference_${index + 1}.jpg';
       archive.addFile(ArchiveFile(imagePath, photo.bytes.length, photo.bytes));
+      final comment = _htmlEscape(photo.comment.trim());
       placemarks.write(
-          '''<Placemark><name>Foto ${index + 1}</name><description><![CDATA[<img src="$imagePath" width="640"/><br/>Capturada: ${photo.capturedAt.toIso8601String()}]]></description><Style><IconStyle><Icon><href>https://maps.google.com/mapfiles/kml/shapes/camera.png</href></Icon></IconStyle></Style><Point><altitudeMode>absolute</altitudeMode><coordinates>${photo.longitude},${photo.latitude},${photo.altitude}</coordinates></Point></Placemark>''');
+          '''<Placemark><name>Foto ${index + 1}</name><description><![CDATA[<img src="$imagePath" width="640"/><br/>Capturada: ${photo.capturedAt.toIso8601String()}${comment.isEmpty ? '' : '<br/>Comentario: $comment'}]]></description><Style><IconStyle><Icon><href>https://maps.google.com/mapfiles/kml/shapes/camera.png</href></Icon></IconStyle></Style><Point><altitudeMode>absolute</altitudeMode><coordinates>${photo.longitude},${photo.latitude},${photo.altitude}</coordinates></Point></Placemark>''');
     }
     final kml =
         '''<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>$name</name><description>Ruta grabada con KenLab. Incluye ${_route.length} puntos y ${_photos.length} fotos.</description><Placemark><name>$name</name><Style><LineStyle><color>ff2828c6</color><width>5</width></LineStyle></Style><LineString><tessellate>1</tessellate><altitudeMode>absolute</altitudeMode><coordinates>$coordinates</coordinates></LineString></Placemark>$placemarks</Document></kml>''';
@@ -409,16 +502,37 @@ class _FieldMapPageState extends State<FieldMapPage> {
             .firstMatch(description);
         if (longitude == null || latitude == null || imageMatch == null)
           continue;
+        final imageHref =
+            Uri.parse(imageMatch.group(1)!).path.replaceAll('\\', '/');
+        final kmlDirectory = kmlFile.name.contains('/')
+            ? kmlFile.name.substring(0, kmlFile.name.lastIndexOf('/') + 1)
+            : '';
+        final candidates = {
+          imageHref.replaceFirst(RegExp(r'^\./'), ''),
+          '$kmlDirectory$imageHref'.replaceFirst(RegExp(r'^\./'), ''),
+          imageHref.split('/').last,
+        };
         final photoFile = archive.files
-            .where((file) => file.name == imageMatch.group(1))
+            .where(
+                (file) => candidates.contains(file.name.replaceAll('\\', '/')))
             .firstOrNull;
         if (photoFile == null) continue;
+        final commentMatch = RegExp(
+          r'<br\s*/?>\s*Comentario:\s*(.*?)(?:<br\s*/?>|$)',
+          caseSensitive: false,
+          dotAll: true,
+        ).firstMatch(description);
+        final capturedMatch =
+            RegExp(r'Capturada:\s*([^<\r\n]+)').firstMatch(description);
         importedPhotos.add(_RoutePhoto(
           latitude: latitude,
           longitude: longitude,
           altitude: altitude,
-          capturedAt: DateTime.now(),
+          capturedAt:
+              DateTime.tryParse(capturedMatch?.group(1)?.trim() ?? '') ??
+                  DateTime.now(),
           bytes: Uint8List.fromList(photoFile.content),
+          comment: _htmlUnescape(commentMatch?.group(1)?.trim() ?? ''),
         ));
       }
       await _clearPhotoSymbols();
@@ -429,6 +543,8 @@ class _FieldMapPageState extends State<FieldMapPage> {
         _photos.clear();
         _photos.addAll(importedPhotos);
         _recording = false;
+        _navigatingRoute = false;
+        _nextRouteIndex = 0;
         _routeName = document
                 .findAllElements('Document')
                 .firstOrNull
@@ -466,10 +582,114 @@ class _FieldMapPageState extends State<FieldMapPage> {
     _photoSymbols.clear();
   }
 
+  Future<void> _showPhotoGallery() async {
+    if (_photos.isEmpty) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(sheetContext).height * .72,
+          child: Column(children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 12, 8),
+              child: Row(children: [
+                const Expanded(
+                  child: Text('Fotos de la ruta',
+                      style:
+                          TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                ),
+                IconButton(
+                    onPressed: () => Navigator.pop(sheetContext),
+                    icon: const Icon(Icons.close)),
+              ]),
+            ),
+            Expanded(
+              child: ListView.separated(
+                itemCount: _photos.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (context, index) {
+                  final photo = _photos[index];
+                  return ListTile(
+                    leading: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Image.memory(photo.bytes,
+                          width: 58, height: 58, fit: BoxFit.cover),
+                    ),
+                    title: Text(
+                        'Foto ${index + 1} · ${photo.capturedAt.toLocal()}'),
+                    subtitle: Text(
+                      photo.comment.isEmpty
+                          ? '${photo.latitude.toStringAsFixed(6)}, ${photo.longitude.toStringAsFixed(6)}'
+                          : photo.comment,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onTap: () {
+                      Navigator.pop(sheetContext);
+                      _showPhoto(photo, index);
+                    },
+                  );
+                },
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showPhoto(_RoutePhoto photo, int index) => showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text('Foto ${index + 1}'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              InteractiveViewer(child: Image.memory(photo.bytes)),
+              const SizedBox(height: 10),
+              Text(
+                  '${photo.latitude.toStringAsFixed(6)}, ${photo.longitude.toStringAsFixed(6)} · ${photo.capturedAt.toLocal()}'),
+              if (photo.comment.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(photo.comment)),
+              ],
+            ]),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('Cerrar')),
+          ],
+        ),
+      );
+
+  void _toggleMapDimension() {
+    setState(() => _is3d = !_is3d);
+    _map?.animateCamera(ml.CameraUpdate.newCameraPosition(
+      ml.CameraPosition(
+        target: _mapCenter,
+        zoom: 15.5,
+        tilt: _is3d ? 55 : 0,
+      ),
+    ));
+  }
+
   String _xmlEscape(String value) => value
       .replaceAll('&', '&amp;')
       .replaceAll('<', '&lt;')
       .replaceAll('>', '&gt;');
+  String _htmlEscape(String value) => value
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;');
+  String _htmlUnescape(String value) => value
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&#39;', "'")
+      .replaceAll('&amp;', '&');
   String _safeFileName(String value) => value
           .trim()
           .replaceAll(RegExp(r'[^A-Za-z0-9_-]+'), '_')
@@ -511,8 +731,13 @@ class _FieldMapPageState extends State<FieldMapPage> {
                 icon: const Icon(Icons.download_for_offline_outlined)),
             IconButton(
                 tooltip: 'Importar KMZ de otro técnico',
-                onPressed: _importKmz,
+                onPressed: _recording || _navigatingRoute ? null : _importKmz,
                 icon: const Icon(Icons.upload_file_outlined)),
+            if (_photos.isNotEmpty)
+              IconButton(
+                  tooltip: 'Ver fotos de la ruta',
+                  onPressed: _showPhotoGallery,
+                  icon: const Icon(Icons.photo_library_outlined)),
             const SizedBox(width: 4),
           ],
         ),
@@ -522,10 +747,10 @@ class _FieldMapPageState extends State<FieldMapPage> {
             onMapCreated: _onMapCreated,
             onStyleLoadedCallback: _redrawRoute,
             onCameraMove: (position) => _mapCenter = position.target,
-            initialCameraPosition: const ml.CameraPosition(
+            initialCameraPosition: ml.CameraPosition(
               target: ml.LatLng(0, 0),
               zoom: 1.5,
-              tilt: 55,
+              tilt: _is3d ? 55 : 0,
             ),
             trackCameraPosition: true,
             rotateGesturesEnabled: true,
@@ -536,14 +761,22 @@ class _FieldMapPageState extends State<FieldMapPage> {
             top: 14,
             child: Card(
               color: Colors.white.withValues(alpha: .94),
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.view_in_ar, color: Color(0xFFC62828), size: 18),
-                  SizedBox(width: 6),
-                  Text('Vista 3D',
-                      style: TextStyle(fontWeight: FontWeight.w700)),
-                ]),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: _toggleMapDimension,
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(_is3d ? Icons.view_in_ar : Icons.map_outlined,
+                        color: const Color(0xFFC62828), size: 18),
+                    const SizedBox(width: 6),
+                    Text(_is3d ? 'Vista 3D' : 'Vista 2D',
+                        style: const TextStyle(fontWeight: FontWeight.w700)),
+                    const SizedBox(width: 5),
+                    const Icon(Icons.swap_horiz, size: 16),
+                  ]),
+                ),
               ),
             ),
           ),
@@ -590,6 +823,28 @@ class _FieldMapPageState extends State<FieldMapPage> {
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  if (_navigatingRoute)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Row(children: [
+                        const Icon(Icons.directions_walk,
+                            color: Color(0xFFC62828), size: 19),
+                        const SizedBox(width: 7),
+                        Expanded(
+                          child: Text(
+                            'Punto ${(_nextRouteIndex + 1).clamp(1, _route.length)} de ${_route.length} · ${_nextPointMeters?.toStringAsFixed(0) ?? '—'} m · rumbo ${_nextPointBearing?.toStringAsFixed(0) ?? '—'}° · ${_offRouteMeters != null && _offRouteMeters! > 15 ? 'fuera de ruta ${_offRouteMeters!.toStringAsFixed(0)} m' : 'siguiendo la ruta'}',
+                            style: const TextStyle(
+                                fontSize: 11, fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Detener guía de ruta',
+                          visualDensity: VisualDensity.compact,
+                          onPressed: _stopRouteGuidance,
+                          icon: const Icon(Icons.close),
+                        ),
+                      ]),
+                    ),
                   Row(children: [
                     Expanded(
                       child: TextField(
@@ -636,13 +891,33 @@ class _FieldMapPageState extends State<FieldMapPage> {
                       icon: const Icon(Icons.share_outlined),
                     ),
                   ]),
+                  if (_route.length >= 2 && !_recording)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 7),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          onPressed: _navigatingRoute
+                              ? _stopRouteGuidance
+                              : _startRouteGuidance,
+                          icon: Icon(_navigatingRoute
+                              ? Icons.stop_circle_outlined
+                              : Icons.directions_walk),
+                          label: Text(_navigatingRoute
+                              ? 'Detener guía de ruta'
+                              : 'Guiarme por esta ruta'),
+                        ),
+                      ),
+                    ),
                   if (_photos.isNotEmpty)
                     Align(
                       alignment: Alignment.centerLeft,
-                      child: Text(
-                          '${_photos.length} foto${_photos.length == 1 ? '' : 's'} asociada${_photos.length == 1 ? '' : 's'} a puntos de la ruta',
-                          style: const TextStyle(
-                              fontSize: 11, color: Color(0xFF66736B))),
+                      child: TextButton.icon(
+                        onPressed: _showPhotoGallery,
+                        icon:
+                            const Icon(Icons.photo_library_outlined, size: 16),
+                        label: Text('${_photos.length} fotos · Ver galería'),
+                      ),
                     ),
                   const Padding(
                     padding: EdgeInsets.only(top: 7),
@@ -678,8 +953,16 @@ class _RoutePhoto extends _RoutePoint {
       required super.longitude,
       required super.altitude,
       required super.capturedAt,
-      required this.bytes});
+      required this.bytes,
+      this.comment = ''});
   final Uint8List bytes;
+  final String comment;
+}
+
+class _CapturedRoutePhoto {
+  const _CapturedRoutePhoto({required this.bytes, required this.comment});
+  final Uint8List bytes;
+  final String comment;
 }
 
 class _RoutePhotoDialog extends StatefulWidget {
@@ -692,6 +975,7 @@ class _RoutePhotoDialog extends StatefulWidget {
 class _RoutePhotoDialogState extends State<_RoutePhotoDialog> {
   CameraController? _camera;
   String? _error;
+  final _commentController = TextEditingController();
 
   @override
   void initState() {
@@ -702,6 +986,7 @@ class _RoutePhotoDialogState extends State<_RoutePhotoDialog> {
   @override
   void dispose() {
     _camera?.dispose();
+    _commentController.dispose();
     super.dispose();
   }
 
@@ -730,7 +1015,15 @@ class _RoutePhotoDialogState extends State<_RoutePhotoDialog> {
     if (camera == null || !camera.value.isInitialized) return;
     try {
       final file = await camera.takePicture();
-      if (mounted) Navigator.pop(context, await file.readAsBytes());
+      if (mounted) {
+        Navigator.pop(
+          context,
+          _CapturedRoutePhoto(
+            bytes: await file.readAsBytes(),
+            comment: _commentController.text.trim(),
+          ),
+        );
+      }
     } catch (error) {
       if (mounted) setState(() => _error = 'No se pudo tomar la foto: $error');
     }
@@ -741,10 +1034,24 @@ class _RoutePhotoDialogState extends State<_RoutePhotoDialog> {
         title: const Text('Foto de referencia'),
         content: SizedBox(
           width: 360,
-          height: 420,
-          child: _camera != null && _camera!.value.isInitialized
-              ? CameraPreview(_camera!)
-              : Center(child: Text(_error ?? 'Abriendo cámara…')),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            SizedBox(
+              height: 330,
+              child: _camera != null && _camera!.value.isInitialized
+                  ? CameraPreview(_camera!)
+                  : Center(child: Text(_error ?? 'Abriendo cámara…')),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _commentController,
+              maxLines: 2,
+              decoration: const InputDecoration(
+                labelText: 'Comentario (opcional)',
+                hintText: 'Describe qué debe observar otro técnico',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ]),
         ),
         actions: [
           TextButton(

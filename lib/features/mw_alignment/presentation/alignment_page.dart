@@ -8,7 +8,12 @@ import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
 import '../../../core/location/elevation_service.dart';
+import '../../mw_profile/data/mw_profile_api.dart';
+import '../../mw_profile/models/link_profile.dart';
+import '../../mw_profile/presentation/link_profile_chart.dart';
 import '../domain/link_calculator.dart';
+
+enum _GuidedStep { lateral, tilt, azimuth, fine }
 
 class AlignmentPage extends StatefulWidget {
   const AlignmentPage({super.key});
@@ -18,6 +23,10 @@ class AlignmentPage extends StatefulWidget {
 }
 
 class _AlignmentPageState extends State<AlignmentPage> {
+  static const _lateralTolerance = 1.5;
+  static const _tiltTolerance = 1.0;
+  static const _azimuthTolerance = 2.0;
+
   CameraController? _camera;
   Position? _siteA;
   AccelerometerEvent? _acceleration;
@@ -31,6 +40,12 @@ class _AlignmentPageState extends State<AlignmentPage> {
   bool _loadingElevation = false;
   String? _elevationError;
   Timer? _elevationDebounce;
+  Timer? _profileDebounce;
+  LinkProfile? _profile;
+  bool _profileLoading = false;
+  String? _profileError;
+  int _profileRequestNumber = 0;
+  _GuidedStep? _guidedStep;
   StreamSubscription<AccelerometerEvent>? _accSubscription;
   StreamSubscription<MagnetometerEvent>? _magSubscription;
 
@@ -56,6 +71,7 @@ class _AlignmentPageState extends State<AlignmentPage> {
     _siteBLat.dispose();
     _siteBLon.dispose();
     _elevationDebounce?.cancel();
+    _profileDebounce?.cancel();
     _siteAAntennaHeight.dispose();
     _siteBAntennaHeight.dispose();
     _connectionCode.dispose();
@@ -112,8 +128,12 @@ class _AlignmentPageState extends State<AlignmentPage> {
       if (mounted)
         setState(() {
           _siteA = position;
+          _profile = null;
+          _profileLoading = false;
+          _profileError = null;
           _error = null;
         });
+      _scheduleProfileRequest();
     } catch (error) {
       if (mounted)
         setState(
@@ -170,7 +190,14 @@ class _AlignmentPageState extends State<AlignmentPage> {
     );
   }
 
+  double? get _targetAzimuth =>
+      _profile?.azimuthADegrees ?? _geometry?.bearingDegrees;
+  double? get _targetDistance =>
+      _profile?.distanceMeters ?? _geometry?.distanceMeters;
+
   double? get _tilt {
+    final apiTilt = _profile?.tiltADegrees;
+    if (apiTilt != null) return apiTilt;
     final start = _siteA;
     final endAltitude = _siteBGroundAltitude;
     final startHeight = double.tryParse(_siteAAntennaHeight.text.trim());
@@ -180,6 +207,8 @@ class _AlignmentPageState extends State<AlignmentPage> {
         endAltitude == null ||
         startHeight == null ||
         endHeight == null ||
+        startHeight < 0 ||
+        endHeight < 0 ||
         geometry == null) {
       return null;
     }
@@ -192,18 +221,110 @@ class _AlignmentPageState extends State<AlignmentPage> {
     );
   }
 
+  double? get _lateralAngle {
+    final acceleration = _acceleration;
+    if (acceleration == null) return null;
+    // Use the gravity axis appropriate to the instructed phone orientation:
+    // flat during lateral setup, upright during tilt and fine alignment.
+    final upright = acceleration.y.abs() >= acceleration.z.abs();
+    final across = upright ? acceleration.x : acceleration.y;
+    final vertical = upright ? acceleration.y : acceleration.z;
+    return math.atan2(across, vertical.abs()) * 180 / math.pi;
+  }
+
   void _siteBCoordinatesChanged() {
     setState(() {
       _siteBGroundAltitude = null;
       _elevationError = null;
+      _profile = null;
+      _profileLoading = false;
+      _profileError = null;
     });
     _elevationDebounce?.cancel();
     final lat = double.tryParse(_siteBLat.text.trim().replaceAll('−', '-'));
     final lon = double.tryParse(_siteBLon.text.trim().replaceAll('−', '-'));
-    if (lat == null || lon == null || lat.abs() > 90 || lon.abs() > 180) return;
-    _elevationDebounce = Timer(const Duration(milliseconds: 500), () {
-      _fetchSiteBElevation(lat, lon);
+    if (lat == null || lon == null || lat.abs() > 90 || lon.abs() > 180) {
+      _scheduleProfileRequest();
+      return;
+    }
+    if (!const MwProfileApi().isConfigured) {
+      _elevationDebounce = Timer(const Duration(milliseconds: 500), () {
+        _fetchSiteBElevation(lat, lon);
+      });
+    }
+    _scheduleProfileRequest();
+  }
+
+  void _scheduleProfileRequest() {
+    _profileDebounce?.cancel();
+    final requestNumber = ++_profileRequestNumber;
+    final siteA = _siteA;
+    final lat = double.tryParse(_siteBLat.text.trim().replaceAll('−', '-'));
+    final lon = double.tryParse(_siteBLon.text.trim().replaceAll('−', '-'));
+    final heightA = double.tryParse(_siteAAntennaHeight.text.trim());
+    final heightB = double.tryParse(_siteBAntennaHeight.text.trim());
+    if (!const MwProfileApi().isConfigured ||
+        siteA == null ||
+        lat == null ||
+        lon == null ||
+        heightA == null ||
+        heightB == null ||
+        heightA < 0 ||
+        heightB < 0) {
+      if (mounted && _profileLoading) {
+        setState(() => _profileLoading = false);
+      }
+      return;
+    }
+    _profileDebounce = Timer(const Duration(milliseconds: 800), () {
+      _requestProfile(siteA, lat, lon, heightA, heightB, requestNumber);
     });
+  }
+
+  void _profileInputsChanged() {
+    setState(() {
+      _profile = null;
+      _profileError = null;
+    });
+    _scheduleProfileRequest();
+  }
+
+  Future<void> _requestProfile(
+      Position siteA,
+      double latitudeB,
+      double longitudeB,
+      double heightA,
+      double heightB,
+      int requestNumber) async {
+    setState(() {
+      _profileLoading = true;
+      _profileError = null;
+    });
+    try {
+      final profile =
+          await const MwProfileApi().calculateProfile(LinkProfileRequest(
+        siteA: SiteProfileInput(
+            latitude: siteA.latitude,
+            longitude: siteA.longitude,
+            antennaHeightMeters: heightA),
+        siteB: SiteProfileInput(
+            latitude: latitudeB,
+            longitude: longitudeB,
+            antennaHeightMeters: heightB),
+      ));
+      if (!mounted || requestNumber != _profileRequestNumber) return;
+      setState(() {
+        _profile = profile;
+        _siteBGroundAltitude = profile.siteBGroundAltitudeMeters;
+        _profileLoading = false;
+      });
+    } catch (error) {
+      if (!mounted || requestNumber != _profileRequestNumber) return;
+      setState(() {
+        _profileLoading = false;
+        _profileError = error.toString();
+      });
+    }
   }
 
   Future<void> _fetchSiteBElevation(double latitude, double longitude) async {
@@ -249,15 +370,194 @@ class _AlignmentPageState extends State<AlignmentPage> {
     _siteBCoordinatesChanged();
   }
 
+  double _angularError(double measured, double target) =>
+      ((measured - target + 540) % 360) - 180;
+
+  double? get _azimuthError {
+    final heading = _heading;
+    final target = _targetAzimuth;
+    if (heading == null || target == null) return null;
+    return _angularError(heading, target);
+  }
+
+  bool get _lateralReady =>
+      _lateralAngle != null && _lateralAngle!.abs() <= _lateralTolerance;
+  bool get _tiltReady =>
+      _pitch != null &&
+      _tilt != null &&
+      (_pitch! - _tilt!).abs() <= _tiltTolerance;
+  bool get _azimuthReady =>
+      _azimuthError != null && _azimuthError!.abs() <= _azimuthTolerance;
+  bool get _fineAligned => _lateralReady && _tiltReady && _azimuthReady;
+
+  void _startGuidedAlignment() =>
+      setState(() => _guidedStep = _GuidedStep.lateral);
+
+  void _advanceGuidedAlignment() {
+    final step = _guidedStep;
+    if (step == _GuidedStep.lateral && _lateralReady) {
+      setState(() => _guidedStep = _GuidedStep.tilt);
+    } else if (step == _GuidedStep.tilt && _tiltReady) {
+      setState(() => _guidedStep = _GuidedStep.azimuth);
+    } else if (step == _GuidedStep.azimuth && _azimuthReady) {
+      setState(() => _guidedStep = _GuidedStep.fine);
+    }
+  }
+
+  Widget _guidedAlignmentCard() {
+    final step = _guidedStep;
+    if (step == null) {
+      return FilledButton.icon(
+        onPressed: _targetAzimuth == null ? null : _startGuidedAlignment,
+        icon: const Icon(Icons.assistant_direction),
+        label: const Text('Iniciar alineamiento guiado'),
+      );
+    }
+
+    final (title, instruction, measured, target, tolerance, ready) =
+        switch (step) {
+      _GuidedStep.lateral => (
+          '1 / 3 · Inclinación lateral',
+          'Pon el teléfono acostado, pantalla hacia arriba, sobre una superficie horizontal del soporte. Ajusta el lateral a 0°.',
+          _lateralAngle,
+          0.0,
+          _lateralTolerance,
+          _lateralReady,
+        ),
+      _GuidedStep.tilt => (
+          '2 / 3 · Tilt vertical',
+          'Ahora coloca el teléfono parado, alineado con el eje de la antena. Ajusta el tilt calculado.',
+          _pitch,
+          _tilt,
+          _tiltTolerance,
+          _tiltReady,
+        ),
+      _GuidedStep.azimuth => (
+          '3 / 3 · Azimut',
+          'Mantén el teléfono parado y apunta su parte superior hacia el azimut objetivo.',
+          _heading,
+          _targetAzimuth,
+          _azimuthTolerance,
+          _azimuthReady,
+        ),
+      _GuidedStep.fine => (
+          'Alineamiento fino',
+          _fineAligned
+              ? 'Valores dentro de las tolerancias beta. Confirma el nivel del radio antes de cerrar el trabajo.'
+              : 'Ajusta lateral, tilt y azimut. El indicador solo se pondrá verde cuando los tres estén dentro de tolerancia.',
+          null,
+          null,
+          0.0,
+          _fineAligned,
+        ),
+    };
+
+    final difference = measured == null || target == null
+        ? null
+        : step == _GuidedStep.azimuth
+            ? _angularError(measured, target)
+            : measured - target;
+    final background = step == _GuidedStep.fine
+        ? (_fineAligned ? const Color(0xFFE4F4E9) : const Color(0xFFFFECEC))
+        : Colors.white;
+    final accent = step == _GuidedStep.fine && _fineAligned
+        ? const Color(0xFF198754)
+        : const Color(0xFFC62828);
+
+    return Card(
+      margin: EdgeInsets.zero,
+      color: background,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(
+                step == _GuidedStep.fine
+                    ? Icons.center_focus_strong
+                    : Icons.screen_rotation_alt,
+                color: accent),
+            const SizedBox(width: 8),
+            Expanded(
+                child: Text(title,
+                    style:
+                        TextStyle(fontWeight: FontWeight.w800, color: accent))),
+            if (step != _GuidedStep.fine)
+              IconButton(
+                  onPressed: () => setState(() => _guidedStep = null),
+                  tooltip: 'Salir de guía',
+                  icon: const Icon(Icons.close)),
+          ]),
+          Text(instruction, style: const TextStyle(fontSize: 12, height: 1.35)),
+          if (step == _GuidedStep.fine) ...[
+            const SizedBox(height: 10),
+            _fineMetric(
+                'Lateral', _lateralAngle, _lateralTolerance, _lateralReady),
+            _fineMetric(
+                'Tilt',
+                _pitch == null || _tilt == null ? null : _pitch! - _tilt!,
+                _tiltTolerance,
+                _tiltReady),
+            _fineMetric(
+                'Azimut', _azimuthError, _azimuthTolerance, _azimuthReady),
+            const SizedBox(height: 6),
+            Text(
+                _fineAligned
+                    ? 'LISTO PARA COMPROBACIÓN DEL RADIO'
+                    : 'AJUSTE PENDIENTE',
+                style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    color: accent,
+                    letterSpacing: .5)),
+          ] else ...[
+            const SizedBox(height: 10),
+            Text(
+              measured == null || target == null
+                  ? 'Esperando sensor o valores objetivo…'
+                  : 'Medido ${measured.toStringAsFixed(1)}°  ·  Objetivo ${target.toStringAsFixed(1)}°  ·  Error ${difference!.abs().toStringAsFixed(1)}° (±${tolerance.toStringAsFixed(1)}°)',
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton(
+                onPressed: ready ? _advanceGuidedAlignment : null,
+                child: Text(step == _GuidedStep.azimuth
+                    ? 'Ir a alineamiento fino'
+                    : 'Continuar'),
+              ),
+            ),
+          ],
+          const Text(
+              'Tolerancias beta: lateral ±1.5°, tilt ±1°, azimut ±2°. La brújula puede desviarse por metal y no sustituye la lectura del radio.',
+              style: TextStyle(fontSize: 10, color: Color(0xFF66736B))),
+        ]),
+      ),
+    );
+  }
+
+  Widget _fineMetric(
+          String label, double? error, double tolerance, bool ready) =>
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Row(children: [
+          Icon(ready ? Icons.check_circle : Icons.radio_button_unchecked,
+              size: 17,
+              color: ready ? const Color(0xFF198754) : const Color(0xFFC62828)),
+          const SizedBox(width: 7),
+          Expanded(
+              child: Text(
+                  '$label · ${error == null ? 'sensor no disponible' : 'error ${error.abs().toStringAsFixed(1)}° / ±${tolerance.toStringAsFixed(1)}°'}')),
+        ]),
+      );
+
   double? get _pitch {
     final acceleration = _acceleration;
     if (acceleration == null) return null;
-    final gravity = math.sqrt(acceleration.x * acceleration.x +
-        acceleration.y * acceleration.y +
-        acceleration.z * acceleration.z);
-    if (gravity == 0) return null;
-    final sine = (-acceleration.z / gravity).clamp(-1.0, 1.0);
-    return math.asin(sine) * 180 / math.pi;
+    final verticalGravity = acceleration.y;
+    if (verticalGravity.abs() < .01 && acceleration.z.abs() < .01) return null;
+    // With the phone upright, Y follows its long edge and Z is perpendicular
+    // to the screen; this gives the phone's tilt away from vertical.
+    return math.atan2(-acceleration.z, verticalGravity) * 180 / math.pi;
   }
 
   void _onConnect() {
@@ -271,6 +571,8 @@ class _AlignmentPageState extends State<AlignmentPage> {
   @override
   Widget build(BuildContext context) {
     final geometry = _geometry;
+    final targetAzimuth = _targetAzimuth;
+    final targetDistance = _targetDistance;
     final camera = _camera;
     return Scaffold(
       appBar: AppBar(
@@ -315,10 +617,12 @@ class _AlignmentPageState extends State<AlignmentPage> {
                   child: IgnorePointer(
                     child: CustomPaint(
                       painter: _BearingGuidePainter(
-                        relativeBearing: _heading == null
-                            ? 0
-                            : geometry.bearingDegrees - _heading!,
-                        headingAvailable: _heading != null,
+                        relativeBearing:
+                            _heading == null || targetAzimuth == null
+                                ? 0
+                                : targetAzimuth - _heading!,
+                        headingAvailable:
+                            _heading != null && targetAzimuth != null,
                       ),
                     ),
                   ),
@@ -341,14 +645,14 @@ class _AlignmentPageState extends State<AlignmentPage> {
                                 ? (_siteA == null
                                     ? 'Obteniendo ubicación de Site A…'
                                     : 'Ingresa las coordenadas de Site B')
-                                : 'AZIMUT OBJETIVO  ${geometry.bearingDegrees.toStringAsFixed(1)}°',
+                                : 'AZIMUT OBJETIVO  ${targetAzimuth!.toStringAsFixed(1)}°',
                             style: const TextStyle(
                                 color: Colors.white,
                                 fontWeight: FontWeight.w800,
                                 letterSpacing: .5)),
                         if (geometry != null)
                           Text(
-                              'Distancia ${_distanceLabel(geometry.distanceMeters)}${_heading == null ? '  •  rumbo de brújula no disponible' : '  •  brújula ${_heading!.toStringAsFixed(0)}°'}',
+                              'Distancia ${_distanceLabel(targetDistance!)}${_heading == null ? '  •  rumbo de brújula no disponible' : '  •  brújula ${_heading!.toStringAsFixed(0)}°'}',
                               style: const TextStyle(
                                   color: Colors.white70, fontSize: 12)),
                         if (_error != null)
@@ -422,12 +726,16 @@ class _AlignmentPageState extends State<AlignmentPage> {
                       const SizedBox(width: 6),
                       Expanded(
                         child: Text(
-                          _loadingElevation
-                              ? 'Consultando elevación del terreno de Site B…'
-                              : _siteBGroundAltitude != null
-                                  ? 'Elevación Site B: ${_siteBGroundAltitude!.toStringAsFixed(1)} m (estimada automáticamente)'
-                                  : _elevationError ??
-                                      'La elevación se consulta al ingresar coordenadas.',
+                          _profileLoading
+                              ? 'Consultando perfil y elevación con MW Profile…'
+                              : _profile != null
+                                  ? 'Elevación Site B: ${_profile!.siteBGroundAltitudeMeters.toStringAsFixed(1)} m · MW Profile'
+                                  : _loadingElevation
+                                      ? 'Consultando elevación del terreno de Site B…'
+                                      : _siteBGroundAltitude != null
+                                          ? 'Elevación Site B: ${_siteBGroundAltitude!.toStringAsFixed(1)} m (estimada automáticamente)'
+                                          : _elevationError ??
+                                              'La elevación se consulta al ingresar coordenadas.',
                           style: const TextStyle(
                               fontSize: 12, color: Color(0xFF66736B)),
                         ),
@@ -438,12 +746,16 @@ class _AlignmentPageState extends State<AlignmentPage> {
                   Row(children: [
                     Expanded(
                         child: _numberField(
-                            _siteAAntennaHeight, 'Altura antena A (m)', '0')),
+                            _siteAAntennaHeight, 'Altura antena A (m)', '0',
+                            onChanged: _profileInputsChanged)),
                     const SizedBox(width: 10),
                     Expanded(
                         child: _numberField(
-                            _siteBAntennaHeight, 'Altura antena B (m)', '0')),
+                            _siteBAntennaHeight, 'Altura antena B (m)', '0',
+                            onChanged: _profileInputsChanged)),
                   ]),
+                  const SizedBox(height: 10),
+                  _buildProfileResult(),
                 ] else ...[
                   const SizedBox(height: 12),
                   Row(children: [
@@ -459,6 +771,8 @@ class _AlignmentPageState extends State<AlignmentPage> {
                       'La sesión compartida se habilitará al conectar el backend. Mientras tanto, usa coordenadas manuales.',
                       style: TextStyle(fontSize: 11, color: Color(0xFF66736B))),
                 ],
+                const SizedBox(height: 12),
+                _guidedAlignmentCard(),
                 const SizedBox(height: 12),
                 Card(
                   margin: EdgeInsets.zero,
@@ -505,6 +819,39 @@ class _AlignmentPageState extends State<AlignmentPage> {
               ],
             ),
           ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildProfileResult() {
+    final profile = _profile;
+    if (profile == null) {
+      if (!const MwProfileApi().isConfigured) {
+        return const Text(
+            'MW Profile pendiente de dominio. Se conectará al configurar MW_PROFILE_API_BASE_URL.',
+            style: TextStyle(fontSize: 11, color: Color(0xFF66736B)));
+      }
+      if (_profileError != null) {
+        return Text(
+            'No se pudo obtener el perfil: $_profileError. Azimut/distancia locales siguen disponibles.',
+            style: const TextStyle(fontSize: 11, color: Color(0xFF9B2C2C)));
+      }
+      return const SizedBox.shrink();
+    }
+    return Card(
+      margin: EdgeInsets.zero,
+      color: Colors.white,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Perfil de línea de vista · MW Profile',
+              style: TextStyle(fontWeight: FontWeight.w800)),
+          const SizedBox(height: 6),
+          Text(
+              '${_distanceLabel(profile.distanceMeters)}  ·  Az A ${profile.azimuthADegrees.toStringAsFixed(1)}°  ·  Tilt A ${profile.tiltADegrees.toStringAsFixed(2)}°',
+              style: const TextStyle(fontSize: 12)),
+          LinkProfileChart(profile: profile),
         ]),
       ),
     );
